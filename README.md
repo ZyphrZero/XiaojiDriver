@@ -1,4 +1,4 @@
-# xiaoji 驱动
+# XiaojiDriver
 
 xiaoji 是基于 [HIDMaestro](https://github.com/hifihedgehog/HIDMaestro) 的 Windows x64 用户态 HID 驱动。安装后，Windows 会识别一个虚拟键盘和一个虚拟鼠标。测试台通过宿主把报告写入共享内存；`xiaoji.dll` 在 UMDF 2.15 下运行，通过系统的 `mshidumdf` 把报告交给 Windows HID 输入栈。
 
