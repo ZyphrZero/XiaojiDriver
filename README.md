@@ -73,7 +73,9 @@ powershell.exe -NoProfile -STA -File .\scripts\xiaoji_gui_smoke.ps1
 
 推送到 `main`、`feature/**` 或向 `main` 提交 PR 时，GitHub Actions 在 Windows x64 上编译驱动、生成 CAT 并校验 ZIP 内容。普通提交和手动运行只生成 Actions 构件，不创建 Release。
 
-发布时，在已进入 `main` 的提交上创建并推送四段版本标签。标签须与 `driver/xiaoji.inf` 的 `DriverVer` 和 DLL 文件版本一致。例如，版本 `1.0.0.1` 的发布命令是 `git tag v1.0.0.1 <提交哈希>`，再运行 `git push origin refs/tags/v1.0.0.1`。工作流验证通过后才创建 GitHub **Pre-release**，不会覆盖已发布版本。
+发布标签和附件名使用仓库根目录 [`VERSION`](VERSION) 中的三段产品版本号。在已进入 `main` 的提交上创建对应标签，例如 `git tag v0.1.0 <提交哈希>`，再运行 `git push origin refs/tags/v0.1.0`。工作流验证通过后才创建 GitHub **Pre-release**，不会覆盖已发布版本。
+
+Windows 驱动单独使用四段版本号：产品 `0.1.0` 包含的驱动版本为 `1.0.0.1`。打包时仍会检查 `driver/xiaoji.inf` 的 `DriverVer` 与驱动 DLL 文件版本一致。
 
 发布附件分开提供：`xiaoji-cli-<版本>-win-x64.zip` 是独立管理命令；`xiaoji-driver-<版本>-win-x64-unsigned.zip` 是未签名驱动包；`xiaoji-client-sdk-<版本>-win-x64.zip` 是第三方调用库和示例。`SHA256SUMS.txt` 列出附件摘要，三者都不带 GUI、证书或微软 SDK/WDK 工具。**未签名驱动包不是可直接安装的正式驱动。**
 

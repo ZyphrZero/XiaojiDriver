@@ -14,9 +14,11 @@ foreach ($name in $driverFiles) {
 }
 $infVersion = @(Select-String -LiteralPath (Join-Path $DriverDir 'xiaoji.inf') -Pattern '^\s*DriverVer\s*=\s*[\d/]+\s*,\s*(\d+(?:\.\d+){3})\s*$')
 if ($infVersion.Count -ne 1) { throw 'Expected exactly one four-part DriverVer in xiaoji.inf.' }
-$version = $infVersion[0].Matches[0].Groups[1].Value
+$driverVersion = $infVersion[0].Matches[0].Groups[1].Value
 $dllVersion = (Get-Item -LiteralPath (Join-Path $DriverDir 'xiaoji.dll')).VersionInfo.FileVersionRaw.ToString()
-if ($version -ne $dllVersion) { throw "INF version $version does not match DLL version $dllVersion." }
+if ($driverVersion -ne $dllVersion) { throw "INF version $driverVersion does not match DLL version $dllVersion." }
+$version = (Get-Content -Raw -LiteralPath (Join-Path $root 'VERSION')).Trim()
+if ($version -notmatch '\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z') { throw 'VERSION must contain a three-part release version.' }
 if ($Tag -and $Tag -cne "v$version") { throw "Expected tag v$version, got $Tag." }
 
 $output = [IO.Directory]::CreateDirectory($OutputDir).FullName
