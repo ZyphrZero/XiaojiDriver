@@ -1,7 +1,9 @@
 param(
     [string]$DriverDir = "$PSScriptRoot\..\x64\driver",
+    [string]$SdkDir,
     [Parameter(Mandatory)][string]$OutputDir,
-    [string]$Tag
+    [string]$Tag,
+    [string]$CliDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -18,16 +20,29 @@ if ($version -ne $dllVersion) { throw "INF version $version does not match DLL v
 if ($Tag -and $Tag -cne "v$version") { throw "Expected tag v$version, got $Tag." }
 
 $output = [IO.Directory]::CreateDirectory($OutputDir).FullName
-$name = "xiaoji-driver-$version-win-x64-unsigned.zip"
-$archive = Join-Path $output $name
 $checksum = Join-Path $output 'SHA256SUMS.txt'
-if ((Test-Path -LiteralPath $archive) -or (Test-Path -LiteralPath $checksum)) { throw "Release files already exist in $output." }
+if (Test-Path -LiteralPath $checksum) { throw "Release checksum already exists in $output." }
 $notices = 'LICENSE', 'third_party/HIDMaestro/LICENSE', 'third_party/HIDMaestro/NOTICE.md', 'third_party/HIDMaestro/UPSTREAM.txt'
 $tar = Join-Path ([Environment]::SystemDirectory) 'tar.exe'
-& $tar -a -cf $archive -C (Resolve-Path -LiteralPath $DriverDir).Path @driverFiles -C $root @notices
-if ($LASTEXITCODE -ne 0) { throw "Could not create release archive (tar exit $LASTEXITCODE)." }
-$entries = @(& $tar -tf $archive)
-if ($LASTEXITCODE -ne 0 -or (Compare-Object ($driverFiles + $notices) $entries -CaseSensitive)) { throw 'Unexpected release archive contents.' }
-$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-[IO.File]::WriteAllText($checksum, "$hash  $name`n", [Text.Encoding]::ASCII)
-Write-Output "$name SHA256 $hash"
+function Write-ReleaseArchive($name, $directory, $files, $repoFiles) {
+    $archive = Join-Path $output $name
+    if (Test-Path -LiteralPath $archive) { throw "Release archive already exists: $archive" }
+    & $tar -a -cf $archive -C (Resolve-Path -LiteralPath $directory).Path @files -C $root @repoFiles
+    if ($LASTEXITCODE -ne 0) { throw "Could not create $name (tar exit $LASTEXITCODE)." }
+    $entries = @(& $tar -tf $archive)
+    if ($LASTEXITCODE -ne 0 -or (Compare-Object ($files + $repoFiles) $entries -CaseSensitive)) { throw "Unexpected archive contents: $name" }
+    $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    return "$hash  $name"
+}
+$lines = @(Write-ReleaseArchive "xiaoji-driver-$version-win-x64-unsigned.zip" $DriverDir $driverFiles $notices)
+if ($CliDir) {
+    $lines += Write-ReleaseArchive "xiaoji-cli-$version-win-x64.zip" $CliDir @('xiaoji.exe') ($notices + 'docs/cli.md')
+}
+if ($SdkDir) {
+    $sdkFiles = 'xiaoji_client.dll', 'xiaoji_client.lib', 'xiaoji_client.h', 'xiaoji.py'
+    $sdkDocs = $notices + @('docs/developer.md', 'docs/cli.md', 'sdk/examples/status.c', 'sdk/examples/Status.cs')
+    $sdkDocs += @('sdk/rust/Cargo.toml', 'sdk/rust/Cargo.lock', 'sdk/rust/build.rs', 'sdk/rust/src/lib.rs', 'sdk/rust/examples/status.rs')
+    $lines += Write-ReleaseArchive "xiaoji-client-sdk-$version-win-x64.zip" $SdkDir $sdkFiles $sdkDocs
+}
+[IO.File]::WriteAllText($checksum, ($lines -join "`n") + "`n", [Text.Encoding]::ASCII)
+$lines
