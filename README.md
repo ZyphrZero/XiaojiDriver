@@ -44,4 +44,12 @@ powershell.exe -NoProfile -STA -File .\scripts\xiaoji_gui_smoke.ps1
 
 驱动和 INF 位于 [`driver/`](driver/)，原生宿主与本地签名安装器位于 [`host/`](host/)，GUI 和命令行测试程序源码位于 [`tests/`](tests/)。构建和验证脚本统一放在 [`scripts/`](scripts/)。设备协议、命令行参数和 Raw Input 验证方法见 [xiaoji 技术说明](docs/xiaoji.md)。
 
+## 发布未签名预览包
+
+推送到 `main`、`feature/**` 或向 `main` 提交 PR 时，GitHub Actions 在 Windows x64 上编译驱动、生成 CAT 并校验 ZIP 内容。普通提交和手动运行只生成 Actions 构件，不创建 Release。
+
+发布时，在已进入 `main` 的提交上创建并推送四段版本标签。标签须与 `driver/xiaoji.inf` 的 `DriverVer` 和 DLL 文件版本一致。例如，版本 `1.0.0.1` 的发布命令是 `git tag v1.0.0.1 <提交哈希>`，再运行 `git push origin refs/tags/v1.0.0.1`。工作流验证通过后才创建 GitHub **Pre-release**，不会覆盖已发布版本。
+
+附件为 `xiaoji-driver-<版本>-win-x64-unsigned.zip` 和 `SHA256SUMS.txt`。ZIP 仅含同次构建的 INF、DLL、CAT 及许可证和上游声明；不含安装器、GUI、证书或 SDK/WDK 工具。**这是未签名的开发者包，不是可直接安装的正式驱动。**
+
 仓库根许可证为 [AGPLv3](LICENSE)。派生驱动保留 HIDMaestro 的 [MIT 许可证](third_party/HIDMaestro/LICENSE)及[上游版本与归属声明](third_party/HIDMaestro/NOTICE.md)。

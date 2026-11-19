@@ -1,0 +1,71 @@
+name: Driver CI and release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main, 'feature/**']
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.event_name != 'push' || !github.event.deleted
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require release tags to point into main history
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        shell: bash
+        run: git merge-base --is-ancestor HEAD refs/remotes/origin/main
+
+      - name: Build the x64 UMDF driver and catalog
+        shell: cmd
+        run: scripts\build.cmd x64 driver package
+
+      - name: Verify versions and package the unsigned driver
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ./scripts/package_release.ps1 -Tag $env:RELEASE_TAG -OutputDir "$env:RUNNER_TEMP/release"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: unsigned-driver-x64
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: github.event_name == 'push' && github.ref_type == 'tag' && !github.event.deleted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: unsigned-driver-x64
+          path: release
+
+      - name: Publish unsigned developer pre-release
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS.txt
+          archive="xiaoji-driver-${TAG#v}-win-x64-unsigned.zip"
+          gh release create "$TAG" "$archive" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --prerelease --latest=false --title "xiaoji $TAG · x64 未签名预览版" \
+            --notes '此包供开发者验证，DLL 和 CAT 均未签名，不是可直接安装的正式驱动。不含安装器、测试台或 SDK/WDK 工具。SHA256SUMS.txt 用于核对下载文件。'
