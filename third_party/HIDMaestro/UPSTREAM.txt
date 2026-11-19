@@ -1,0 +1,3 @@
+HIDMaestro upstream: https://github.com/hifihedgehog/HIDMaestro
+commit: d9199785d09a3c206dd30caf163b33295a5ad0a1
+archive sha256: 43bdeb90d7ac857ab8b5701ec7668e783332fc3b24d065e155396710a56f2a36

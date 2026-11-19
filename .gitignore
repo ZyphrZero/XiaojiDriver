@@ -63,9 +63,8 @@ output/
 logs/
 packages/
 DvlErrLog.txt
-cqkeys.sys
-cqkeysdll.dll
-cqkeys.cat
+*.sys
+*.cat
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
@@ -101,9 +100,6 @@ bld/
 !AppConfig.json
 !package.json
 
-# Sample configuration
-!/cqkeyspy_test/driver_config.json
-
 # Build and publish files
 publish/
 *.nupkg
@@ -125,6 +121,9 @@ Generated\ Files/
 # MSTest test Results
 [Tt]est[Rr]esult*/
 [Bb]uild[Ll]og.*
+
+# xiaoji build output
+/build/
 
 # NUNIT
 *.VisualState.xml

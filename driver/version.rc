@@ -1,0 +1,60 @@
+/* Shared VERSIONINFO body for the xiaoji native driver.
+ *
+ * Derived from HIDMaestro driver/version.rc (MIT licensed).
+ *
+ * Each binary includes this file after defining its own XIAOJI_DESC and
+ * XIAOJI_ORIGINAL, which keeps the shared fields in one place and avoids
+ * passing quoted strings through rc.exe on a batch command line.
+ * XIAOJI_VER_* come from xiaoji_version.h.
+ */
+
+#include <winver.h>
+#include "xiaoji_version.h"
+
+#ifndef XIAOJI_DESC
+#define XIAOJI_DESC "Xiaoji"
+#endif
+#ifndef XIAOJI_ORIGINAL
+#define XIAOJI_ORIGINAL "Xiaoji.dll"
+#endif
+
+/* Drivers declare VFT_DRV. verrsrc.h has no input-device subtype (the
+   VFT2_DRV_* list stops at VERSIONED_PRINTER), so a HID minidriver takes
+   VFT2_DRV_SYSTEM. */
+#ifndef XIAOJI_FILETYPE
+#define XIAOJI_FILETYPE    VFT_DRV
+#define XIAOJI_FILESUBTYPE VFT2_DRV_SYSTEM
+#endif
+#ifndef XIAOJI_FILESUBTYPE
+#define XIAOJI_FILESUBTYPE VFT2_UNKNOWN
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    XIAOJI_VER_MAJOR,XIAOJI_VER_MINOR,XIAOJI_VER_PATCH,XIAOJI_VER_BUILD
+ PRODUCTVERSION XIAOJI_VER_MAJOR,XIAOJI_VER_MINOR,XIAOJI_VER_PATCH,XIAOJI_VER_BUILD
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       XIAOJI_FILETYPE
+ FILESUBTYPE    XIAOJI_FILESUBTYPE
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "xiaoji"
+            VALUE "FileDescription",  XIAOJI_DESC
+            VALUE "FileVersion",      XIAOJI_VER_STRING
+            VALUE "InternalName",     XIAOJI_ORIGINAL
+            VALUE "OriginalFilename", XIAOJI_ORIGINAL
+            VALUE "ProductName",      "xiaoji HID Driver"
+            VALUE "ProductVersion",   XIAOJI_VER_STRING
+            VALUE "LegalCopyright",   "Portions copyright HIDMaestro contributors. MIT licensed."
+            VALUE "Comments",         "Derived from HIDMaestro UMDF2: https://github.com/hifihedgehog/HIDMaestro"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

@@ -1,0 +1,4 @@
+/* Version resource for xiaoji.dll, the UMDF2 HID minidriver. */
+#define XIAOJI_DESC     "xiaoji Virtual HID Driver"
+#define XIAOJI_ORIGINAL "xiaoji.dll"
+#include "version.rc"

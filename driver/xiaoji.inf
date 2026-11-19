@@ -1,0 +1,122 @@
+﻿;
+; xiaoji: UMDF2 Virtual HID Minidriver INF
+;
+; Installs xiaoji.dll as a UMDF2 lower filter under MsHidUmdf.sys.
+;
+; Windows 10 compatible: uses explicit AddService directives (not Include/Needs
+; for MsHidUmdf.inf, which only exists on build 22000+).
+;
+; Install: devcon install xiaoji.inf root\xiaoji
+;      or: pnputil /add-driver xiaoji.inf /install
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = HIDClass
+ClassGuid   = {745a17a0-74d3-11d0-b6fe-00a0c90f57da}
+Provider    = %ProviderName%
+CatalogFile = xiaoji.cat
+DriverVer   = 11/19/2026,1.0.0.1
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir  = 13
+UMDriverCopy    = 13
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+xiaoji.dll = 1
+
+; ----------------------------------------------------------------
+;  Manufacturer / Models
+; ----------------------------------------------------------------
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDesc% = xiaoji_Install, root\xiaoji
+
+; ----------------------------------------------------------------
+;  Install sections (Windows 10 compatible, explicit AddService)
+; ----------------------------------------------------------------
+
+[xiaoji_Install.NT]
+CopyFiles = UMDriverCopy
+
+[UMDriverCopy]
+xiaoji.dll
+
+[xiaoji_Install.NT.HW]
+AddReg = xiaoji_HW_AddReg
+
+[xiaoji_HW_AddReg]
+; Lower filters: WUDFRd (UMDF reflector) loads our UMDF2 driver
+HKR,,"LowerFilters",0x00010008,"WUDFRd"
+; NOTE: no "xinputhid" UpperFilter here at the INF level. This package
+; carries the HID minidriver; the optional HIDMaestro XUSB companion is
+; not included in xiaoji.
+; Security: allow all users access (needed for WGI/GameInput non-elevated discovery)
+HKR,,Security,,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
+
+[xiaoji_Install.NT.Services]
+; MsHidUmdf is the HID pass-through function driver
+AddService = mshidumdf,0x000001fa,mshidumdf_Service
+; WUDFRd is the UMDF reflector that hosts our DLL
+AddService = WUDFRd,0x000001f8,WUDFRD_Service
+
+[mshidumdf_Service]
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %10%\System32\Drivers\mshidumdf.sys
+
+[WUDFRD_Service]
+DisplayName    = %WudfRdDesc%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %10%\System32\Drivers\WUDFRd.sys
+
+; ----------------------------------------------------------------
+;  WDF / UMDF section
+; ----------------------------------------------------------------
+
+[xiaoji_Install.NT.Wdf]
+UmdfService                 = xiaoji, xiaoji_UmdfService
+UmdfServiceOrder            = xiaoji
+UmdfKernelModeClientPolicy  = AllowKernelModeClients
+UmdfFileObjectPolicy        = AllowNullAndUnknownFileObjects
+UmdfMethodNeitherAction     = Copy
+UmdfFsContextUsePolicy      = CanUseFsContext2
+; Each virtual gets its own WUDFHost process. Without this, UMDF2 pools
+; multiple xiaoji virtuals (and adjacent xinputhid-bound devices) into
+; one shared WUDFHost and contention between writer threads + concurrent
+; XInputGetState reader threads causes non-linear CPU saturation when
+; 2+ virtuals co-exist with a real xinputhid device in the same host. See
+; issue #3 and docs/investigations/issue3-dual-xinputhid-saturation-2026-04/.
+UmdfHostProcessSharing      = ProcessSharingDisabled
+; A UMDF HID client driver may run its host at high priority (Learn,
+; "Specifying WDF Directives in INF Files", UmdfHostPriority, UMDF 2.15
+; and later). At normal priority, other programs' threads busy on every
+; processor kept the frame worker and the dispatch threads that carry
+; HID class's reads waiting 4 to 533 ms for a processor, and no report
+; went out meanwhile. DsHidMini sets the same directive.
+UmdfHostPriority            = PriorityHigh
+
+[xiaoji_UmdfService]
+UmdfLibraryVersion = 2.15.0
+ServiceBinary      = %13%\xiaoji.dll
+
+; ----------------------------------------------------------------
+;  Strings
+; ----------------------------------------------------------------
+
+[Strings]
+ProviderName     = "xiaoji"
+ManufacturerName = "xiaoji"
+DeviceDesc       = "xiaoji Virtual HID Driver"
+DiskName         = "xiaoji HID Driver Installation Disk"
+WudfRdDesc       = "Windows Driver Foundation - User-mode Driver Framework Reflector"
