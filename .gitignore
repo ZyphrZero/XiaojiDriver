@@ -124,6 +124,7 @@ Generated\ Files/
 
 # xiaoji build output
 /build/
+/sdk/rust/target/
 
 # NUNIT
 *.VisualState.xml

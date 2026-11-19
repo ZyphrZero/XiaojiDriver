@@ -6,6 +6,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <system_error>
+#include "host_entry.h"
 
 namespace fs = std::filesystem;
 
@@ -59,4 +60,8 @@ int InstallEmbeddedPackage(bool check) {
     CloseHandle(process.hProcess);
     if (!ok) throw std::runtime_error("Cannot determine the result of local setup.");
     return static_cast<int>(code);
+}
+
+int main(int argc, char** argv) {
+    return RunXiaojiHost(argc, argv, InstallEmbeddedPackage);
 }

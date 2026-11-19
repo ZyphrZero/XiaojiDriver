@@ -2,13 +2,15 @@
 setlocal EnableExtensions
 
 rem Build the complete HIDMaestro UMDF2 HID driver source as xiaoji.
-rem Usage: scripts\build.cmd [x64] [package | driver [package]]
+rem Usage: scripts\build.cmd [x64] [package | driver [package] | cli | sdk]
 
 for %%D in ("%~dp0..") do set "XIAOJI_ROOT=%%~fD"
 set "DRIVER_DIR=%XIAOJI_ROOT%\driver"
 set "HOST_DIR=%XIAOJI_ROOT%\host"
 set "OUT_DIR=%XIAOJI_ROOT%\build"
 if /i "%~2"=="driver" set "OUT_DIR=%XIAOJI_ROOT%\x64\driver"
+if /i "%~2"=="sdk" set "OUT_DIR=%XIAOJI_ROOT%\x64\sdk"
+if /i "%~2"=="cli" set "OUT_DIR=%XIAOJI_ROOT%\x64\cli"
 if defined XIAOJI_OUT_DIR for %%D in ("%XIAOJI_OUT_DIR%") do set "OUT_DIR=%%~fD"
 set "ARCH=%~1"
 if not defined ARCH set "ARCH=x64"
@@ -28,6 +30,8 @@ if not defined VS_PATH (
     exit /b 1
 )
 
+if /i "%~2"=="sdk" goto :load_msvc
+if /i "%~2"=="cli" goto :load_msvc
 set "SDK_ROOT=%XIAOJI_WINDOWS_SDK_ROOT%"
 if not defined SDK_ROOT if defined WindowsSdkDir set "SDK_ROOT=%WindowsSdkDir%"
 if not defined SDK_ROOT for /f "usebackq delims=" %%I in (`powershell.exe -NoProfile -NonInteractive -Command "(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots').PSObject.Properties | Where-Object Name -like 'Kits*10' | Select-Object -First 1 -ExpandProperty Value"`) do set "SDK_ROOT=%%I"
@@ -54,6 +58,7 @@ if not exist "%WDK_ROOT%\Lib\wdf\umdf\x64\2.15\WdfDriverStubUm.lib" (
     exit /b 1
 )
 
+:load_msvc
 set "VCVARS=%VS_PATH%\VC\Auxiliary\Build\vcvars64.bat"
 if not exist "%VCVARS%" (
     echo ERROR: vcvars64.bat was not found under "%VS_PATH%".
@@ -61,6 +66,8 @@ if not exist "%VCVARS%" (
 )
 call "%VCVARS%" >nul
 if errorlevel 1 exit /b 1
+if /i "%~2"=="sdk" goto :client
+if /i "%~2"=="cli" goto :cli
 
 set "UM_INC=%SDK_ROOT%\Include\%KIT_VER%\um"
 set "SHARED_INC=%SDK_ROOT%\Include\%KIT_VER%\shared"
@@ -108,20 +115,22 @@ if errorlevel 1 exit /b 1
 cl.exe /nologo /W4 /EHsc /std:c++17 /D UNICODE /D _UNICODE ^
     /Fo"%OUT_DIR%\local_install.obj" /c "%HOST_DIR%\local_install.cpp"
 if errorlevel 1 exit /b 1
-cl.exe /nologo /W4 /EHsc /std:c++17 /D UNICODE /D _UNICODE /I"%HOST_DIR%" ^
-    /Fo"%OUT_DIR%\xiaoji_host.obj" /c "%HOST_DIR%\xiaoji_host.cpp"
+call :client
+if errorlevel 1 exit /b 1
+call :link_cli
 if errorlevel 1 exit /b 1
 
 link.exe /nologo /SUBSYSTEM:CONSOLE /MACHINE:X64 /OUT:"%OUT_DIR%\xiaoji-host.exe" ^
     "%OUT_DIR%\xiaoji_host.obj" "%OUT_DIR%\local_install.obj" "%OUT_DIR%\setup.res" setupapi.lib cfgmgr32.lib newdev.lib advapi32.lib shell32.lib ole32.lib uuid.lib user32.lib
 if errorlevel 1 exit /b 1
 
-echo Compiling xiaoji-test.exe GUI ...
+echo Compiling optional xiaoji-gui.exe ...
 "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -File "%~dp0build_setup.ps1" -OutDir "%OUT_DIR%" -SdkBin "%SDK_ROOT%\bin\%KIT_VER%\x64" -WdkBin "%WDK_ROOT%\bin\%KIT_VER%\x86" -Gui
 if errorlevel 1 exit /b 1
 echo BUILD SUCCEEDED: %OUT_DIR%\xiaoji.dll
 echo HOST            : %OUT_DIR%\xiaoji-host.exe
-echo TEST            : %OUT_DIR%\xiaoji-test.exe
+echo MANAGER         : %OUT_DIR%\xiaoji.exe
+echo GUI             : %OUT_DIR%\xiaoji-gui.exe
 
 if /i not "%~2"=="package" exit /b 0
 
@@ -135,4 +144,34 @@ if not exist "%INF2CAT%" (
 if errorlevel 1 exit /b 1
 echo PACKAGE CATALOG: %OUT_DIR%\xiaoji.cat
 
+exit /b 0
+
+:core
+cl.exe /nologo /W4 /O2 /Gy /Gw /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE ^
+    /Fo"%OUT_DIR%\xiaoji_host.obj" /c "%HOST_DIR%\xiaoji_host.cpp"
+exit /b %errorlevel%
+
+:cli
+call :core
+if errorlevel 1 exit /b 1
+:link_cli
+cl.exe /nologo /W4 /O1 /Gy /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE ^
+    /Fo"%OUT_DIR%\management_cli.obj" /Fe"%OUT_DIR%\xiaoji.exe" "%HOST_DIR%\management_cli.cpp" "%OUT_DIR%\xiaoji_host.obj" ^
+    /link /SUBSYSTEM:CONSOLE /OPT:REF shell32.lib user32.lib ole32.lib uuid.lib wintrust.lib
+exit /b %errorlevel%
+
+:client
+call :core
+if errorlevel 1 exit /b 1
+cl.exe /nologo /W4 /O2 /MT /EHsc /std:c++17 /D XIAOJI_CLIENT_BUILD ^
+    /Fo"%OUT_DIR%\xiaoji_client.obj" /c "%XIAOJI_ROOT%\sdk\xiaoji_client.cpp"
+if errorlevel 1 exit /b 1
+link.exe /nologo /DLL /MACHINE:X64 /OPT:REF /OUT:"%OUT_DIR%\xiaoji_client.dll" /IMPLIB:"%OUT_DIR%\xiaoji_client.lib" ^
+    "%OUT_DIR%\xiaoji_client.obj" "%OUT_DIR%\xiaoji_host.obj" shell32.lib user32.lib
+if errorlevel 1 exit /b 1
+copy /y "%XIAOJI_ROOT%\sdk\xiaoji_client.h" "%OUT_DIR%\xiaoji_client.h" >nul
+if errorlevel 1 exit /b 1
+copy /y "%XIAOJI_ROOT%\sdk\xiaoji.py" "%OUT_DIR%\xiaoji.py" >nul
+if errorlevel 1 exit /b 1
+echo CLIENT SDK: %OUT_DIR%\xiaoji_client.dll
 exit /b 0

@@ -7,6 +7,10 @@
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <newdev.h>
+#include <shlobj.h>
+#include "host_entry.h"
+#include "installed_input.h"
+#include "pnp_management.h"
 
 #include <algorithm>
 #include <chrono>
@@ -30,9 +34,7 @@
 #pragma comment(lib, "newdev.lib")
 #pragma comment(lib, "advapi32.lib")
 
-int InstallEmbeddedPackage(bool check);
-
-namespace {
+namespace xiaoji {
 
 constexpr GUID kHidClassGuid = {
     0x745a17a0, 0x74d3, 0x11d0, {0xb6, 0xfe, 0x00, 0xa0, 0xc9, 0x0f, 0x57, 0xda}};
@@ -505,6 +507,10 @@ public:
         KeyStroke stroke{};
         if (!AsciiToKey(character, stroke))
             throw std::runtime_error("unsupported ASCII character for the built-in US key map");
+        TapStroke(stroke, settleMs);
+    }
+
+    void TapStroke(KeyStroke stroke, int settleMs = 8) {
         try { WriteKeyboardReport(stroke.modifier, stroke.usage); }
         catch (...) { WriteKeyboardReport(0, 0); throw; }
         std::this_thread::sleep_for(std::chrono::milliseconds(settleMs));
@@ -596,7 +602,7 @@ bool OwnedConfig(int index, bool allowLegacy = false) {
     return true;
 }
 
-std::wstring BoundOem(int index, bool requireStarted, const std::wstring& allowedInfs, bool includeAbsent = false) {
+std::wstring BoundOem(int index, bool requireStarted, const std::wstring& allowedInfs, bool includeAbsent) {
     const std::wstring instance = index == 0 ? kKeyboardInstance : kMouseInstance;
     DEVINST node = 0;
     auto rc = CM_Locate_DevNodeW(&node, const_cast<wchar_t*>(instance.c_str()), includeAbsent ? CM_LOCATE_DEVNODE_PHANTOM : CM_LOCATE_DEVNODE_NORMAL);
@@ -897,9 +903,52 @@ void Usage() {
         << "xiaoji-host.exe remove\n";
 }
 
-}  // namespace
+void WithOperationLock(const std::function<void()>& operation) {
+    OperationLock lock;
+    operation();
+}
 
-int main(int argc, char** argv) {
+std::uint32_t StartedDevices() {
+    std::uint32_t mask = 0;
+    for (int index : {0, 1}) {
+        if (!BoundOem(index, true, {}).empty()) mask |= 1u << index;
+    }
+    return mask;
+}
+
+template <typename Operation>
+static void WithInstalledDevice(int index, Operation operation) {
+    if (!IsUserAnAdmin()) throw std::runtime_error("Input requires an elevated process.");
+    OperationLock lock;
+    if (BoundOem(index, true, {}).empty()) throw std::runtime_error("Requested xiaoji device is not installed.");
+    XiaojiDevice device(index);
+    device.WaitForDriver(10000);
+    operation(device);
+}
+
+void CheckInstalled(bool keyboard) {
+    WithInstalledDevice(keyboard ? 0 : 1, [](XiaojiDevice&) {});
+}
+
+void TapInstalled(std::uint8_t modifiers, std::uint8_t usage) {
+    WithInstalledDevice(0, [&](XiaojiDevice& device) { device.TapStroke({modifiers, usage}); });
+}
+
+void TypeInstalled(const std::string& text) {
+    KeyStroke stroke{};
+    for (unsigned char character : text) {
+        if (!AsciiToKey(character, stroke)) throw std::invalid_argument("Unsupported byte for the US keyboard mapping.");
+    }
+    WithInstalledDevice(0, [&](XiaojiDevice& device) { device.Type(text); });
+}
+
+void MoveInstalled(int dx, int dy, int wheel) {
+    WithInstalledDevice(1, [&](XiaojiDevice& device) { device.MoveMouse(dx, dy, wheel); });
+}
+}
+
+int RunXiaojiHost(int argc, char** argv, int (*installEmbeddedPackage)(bool)) {
+    using namespace xiaoji;
     try {
         if (argc < 2) {
             Usage();
@@ -913,7 +962,7 @@ int main(int argc, char** argv) {
         if (command == "reconnect-test" && argc == 2) { ReconnectTest(); return 0; }
         if (command == "repeat-test" && argc == 2) { RepeatTest(); return 0; }
         if (command == "install" && (argc == 2 || (argc == 3 && std::string(argv[2]) == "--check")))
-            return InstallEmbeddedPackage(argc == 3);
+            return installEmbeddedPackage(argc == 3);
         OperationLock operation;
         if (command == "repeat-key" && argc == 8) {
             RepeatInstalled(L"," + Widen(argv[2]) + L",", argv + 3);

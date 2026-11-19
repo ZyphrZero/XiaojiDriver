@@ -10,7 +10,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
-internal sealed class TestWindow : Form
+internal sealed class DriverWindow : Form
 {
     readonly FlowLayoutPanel actions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true };
     readonly FlowLayoutPanel inputs = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
@@ -21,17 +21,17 @@ internal sealed class TestWindow : Form
     readonly Button stopRepeat = new Button { Name = "RepeatStop", Text = "停止连发", Enabled = false, AutoSize = true };
     EventWaitHandle repeatStopEvent;
     bool closeAfterRepeat;
-    readonly Label status = new Label { Name = "Status", AutoSize = true, Text = "就绪 · 尚未执行测试", Margin = new Padding(0, 5, 0, 7) };
+    readonly Label status = new Label { Name = "Status", AutoSize = true, Text = "尚未查询设备状态", Margin = new Padding(0, 5, 0, 7) };
     readonly TextBox log = new TextBox { Name = "Log", Multiline = true, ReadOnly = true, Dock = DockStyle.Fill,
-        ScrollBars = ScrollBars.Vertical, WordWrap = true, BackColor = Color.White, AccessibleName = "测试记录" };
+        ScrollBars = ScrollBars.Vertical, WordWrap = true, BackColor = Color.White, AccessibleName = "操作记录" };
     readonly bool admin = LocalSetup.IsAdministrator();
     bool busy;
     LocalSetup.EmbeddedPackage runtime;
     string installedNames;
 
-    public TestWindow()
+    public DriverWindow()
     {
-        Text = "xiaoji 驱动测试台";
+        Text = "xiaoji 驱动管理器";
         Font = new Font("Microsoft YaHei UI", 10);
         AutoScaleMode = AutoScaleMode.Font;
         StartPosition = FormStartPosition.CenterScreen;
@@ -49,20 +49,21 @@ internal sealed class TestWindow : Form
             AutoSize = true, ForeColor = Color.FromArgb(61, 91, 115), Margin = new Padding(1, 3, 0, 14) }, 0, 1);
         grid.Controls.Add(new Label { Text = "驱动与签名", AutoSize = true, Margin = new Padding(0, 4, 0, 3) }, 0, 2);
         grid.Controls.Add(actions, 0, 3);
-        AddButton(actions, "离线自检", "Offline", delegate { return RunWork("离线自检", () => {
-            XiaojiTest.CheckReceiptRules(); LocalSetup.RunSetup(true); return "通过 · 未执行安装"; }); });
         AddButton(actions, "设备状态", "Devices", delegate { return RunWork("设备状态", () => {
-            return XiaojiTest.Devices(null) == 0 ? "未连接 · 当前没有在线的 xiaoji 设备" : "已检测到在线设备"; }); });
+            int started = XiaojiTest.Devices(null);
+            return started == 0 ? "未连接 · 当前没有在线的 xiaoji 设备" : String.Format("{0}/2 个设备已启动", started); }); });
         AddButton(actions, "验证安装", "Verify", () => RunWork("验证安装", XiaojiTest.VerifyInstalled));
         AddButton(actions, "安装驱动…", "Install", Install);
         AddButton(actions, "卸载驱动…", "Uninstall", Uninstall);
+        AddButton(actions, "离线自检", "Offline", delegate { return RunWork("离线自检", () => {
+            XiaojiTest.CheckReceiptRules(); LocalSetup.RunSetup(true); return "通过 · 未执行安装"; }); });
         if (!admin) AddButton(actions, "以管理员身份重开", "Elevate", Elevate);
 
-        grid.Controls.Add(new Label { Text = "真实输入测试", AutoSize = true, Margin = new Padding(0, 14, 0, 3) }, 0, 4);
+        grid.Controls.Add(new Label { Text = "键盘与鼠标", AutoSize = true, Margin = new Padding(0, 14, 0, 3) }, 0, 4);
         grid.Controls.Add(inputs, 0, 5);
         AddButton(inputs, "键盘：点按 X", "Keyboard", () => SendInput(true));
         AddButton(inputs, "鼠标：向右移动", "Mouse", () => SendInput(false));
-        grid.Controls.Add(new Label { Text = "按键连发测试", AutoSize = true, Margin = new Padding(0, 12, 0, 3) }, 0, 6);
+        grid.Controls.Add(new Label { Text = "按键连发", AutoSize = true, Margin = new Padding(0, 12, 0, 3) }, 0, 6);
         var repeatRow = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
         grid.Controls.Add(repeatRow, 0, 7);
         repeatRow.Controls.Add(repeatOptions);
@@ -74,7 +75,8 @@ internal sealed class TestWindow : Form
         stopRepeat.Click += (sender, args) => StopRepeat();
         grid.Controls.Add(status, 0, 8);
         grid.Controls.Add(log, 0, 9);
-        Append("建议先点「离线自检」。打开本窗口不会签名、安装驱动或发送输入。");
+        Append("已安装的设备可直接使用，无需重复安装。点「设备状态」可查看键盘和鼠标是否在线。");
+        Append("键鼠操作会向当前桌面发送输入。打开窗口本身不会发送输入、签名或安装驱动。");
         Console.SetOut(new WindowWriter(this));
         Console.SetError(Console.Out);
     }
@@ -332,8 +334,8 @@ internal sealed class TestWindow : Form
 
     sealed class WindowWriter : TextWriter
     {
-        readonly TestWindow window;
-        public WindowWriter(TestWindow window) { this.window = window; }
+        readonly DriverWindow window;
+        public WindowWriter(DriverWindow window) { this.window = window; }
         public override Encoding Encoding { get { return Encoding.UTF8; } }
         public override void WriteLine(string line) { window.Append(line); }
     }
@@ -343,6 +345,6 @@ internal sealed class TestWindow : Form
     {
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        using (var window = new TestWindow()) Application.Run(window);
+        using (var window = new DriverWindow()) Application.Run(window);
     }
 }

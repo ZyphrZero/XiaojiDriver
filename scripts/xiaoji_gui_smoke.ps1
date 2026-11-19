@@ -1,4 +1,4 @@
-param([string]$GuiExe = "$PSScriptRoot\..\build\xiaoji-test.exe", [switch]$VerifyInstalled)
+param([string]$GuiExe = "$PSScriptRoot\..\build\xiaoji-gui.exe", [switch]$VerifyInstalled)
 $ErrorActionPreference = 'Stop'
 if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw 'Run with powershell.exe -STA' }
 Add-Type -AssemblyName System.Windows.Forms
@@ -10,7 +10,8 @@ $assembly = [Reflection.Assembly]::LoadFrom($path)
 if ($assembly.GetManifestResourceNames() -notcontains 'xiaoji-host.exe') { throw 'Missing embedded input host' }
 $oldOut = [Console]::Out
 $oldError = [Console]::Error
-$form = [Activator]::CreateInstance($assembly.GetType('TestWindow', $true))
+if ($assembly.EntryPoint.DeclaringType.Name -ne 'DriverWindow') { throw 'Expected the driver manager entry point' }
+$form = [Activator]::CreateInstance($assembly.EntryPoint.DeclaringType)
 try {
     $form.Opacity = 0
     $form.ShowInTaskbar = $false
@@ -43,10 +44,11 @@ try {
         $action.PerformClick()
         $deadline = [datetime]::UtcNow.AddSeconds(45)
         do {
-            [Windows.Forms.Application]::DoEvents()
             if ([datetime]::UtcNow -gt $deadline) { throw "GUI action timed out: $name" }
             Start-Sleep -Milliseconds 20
+            [Windows.Forms.Application]::DoEvents()
         } until ($action.Enabled)
+        [Windows.Forms.Application]::DoEvents()
         if ($log.Text -eq $previousLog -or $status.Text -eq $initial) { throw "GUI results were not displayed: $name" }
         if ($name -eq 'Offline' -and $log.Text -notmatch 'Catalog generation complete|xiaoji\.cat') { throw 'Missing real Inf2Cat output' }
         if ($name -eq 'Offline' -and !$status.Text.StartsWith(([string][char]0x901a + [char]0x8fc7))) { throw $log.Text }

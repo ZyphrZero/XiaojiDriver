@@ -1,0 +1,5 @@
+version = 3
+
+[[package]]
+name = "xiaoji-client"
+version = "0.1.0"

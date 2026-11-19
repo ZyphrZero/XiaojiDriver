@@ -16,7 +16,8 @@ HID 报告、共享内存输入、Feature/Output 报告和版本握手逻辑。
 ```text
 driver/                  UMDF2 驱动、共享协议和 INF
 host/                    设备管理、输入和本地签名安装器
-tests/                   GUI 和命令行测试程序源码
+app/                     xiaoji 驱动管理器窗口
+tests/                   命令行诊断、设备检查与 Raw Input 观察
 scripts/                 构建、打包和验证脚本
 third_party/HIDMaestro/  上游许可证与归属信息
 ```
@@ -25,9 +26,9 @@ third_party/HIDMaestro/  上游许可证与归属信息
 
 驱动构建需要 Visual Studio 2022/2026 的 MSVC x64 工具和配套的 Windows SDK/WDK（含 UMDF 2.15）。脚本会通过 `vswhere` 查找 Visual Studio，并从注册表读取 Windows Kits 安装位置。
 
-从仓库根目录运行 `.\scripts\build.cmd x64 driver`，只编译 `xiaoji.dll` 并复制 `xiaoji.inf`，不生成宿主、安装器或测试程序。默认输出到 `x64/driver/`；可用 `XIAOJI_OUT_DIR` 指定目录。需要生成或更新未签名的 `xiaoji.cat` 时，改用 `.\scripts\build.cmd x64 driver package`；不要将旧 CAT 与新 DLL 混用。
+从仓库根目录运行 `.\scripts\build.cmd x64 driver`，只编译 `xiaoji.dll` 并复制 `xiaoji.inf`，不生成管理器、宿主或诊断程序。默认输出到 `x64/driver/`；可用 `XIAOJI_OUT_DIR` 指定目录。需要生成或更新未签名的 `xiaoji.cat` 时，改用 `.\scripts\build.cmd x64 driver package`；不要将旧 CAT 与新 DLL 混用。
 
-全量构建另外需要 .NET Framework 4.8、SignTool 和 Inf2Cat。可用环境变量显式指定工具路径：
+只构建命令行管理工具用 `.\scripts\build.cmd x64 cli`，只需 MSVC 和 Windows SDK，产物 `x64/cli/xiaoji.exe` 可独立运行。全量构建另外需要 .NET Framework 4.8、SignTool 和 Inf2Cat。可用环境变量显式指定工具路径：
 
 ```powershell
 $env:XIAOJI_WINDOWS_SDK_ROOT = 'D:\Windows Kits\10'
@@ -43,7 +44,8 @@ build/xiaoji.dll
 build/xiaoji.inf
 build/xiaoji.cat
 build/xiaoji-host.exe
-build/xiaoji-test.exe
+build/xiaoji.exe
+build/xiaoji-gui.exe
 build/xiaoji-test-cli.exe
 ```
 
@@ -67,13 +69,13 @@ build/xiaoji-test-cli.exe
 
 安装器只签内嵌的 xiaoji 包：签 DLL → 重新生成 CAT → 签 CAT → 验签 → `pnputil /add-driver` 暂存。随后通过 SetupAPI 核对 Windows 实际发布的 OEM 包，重新验签 Driver Store 中的 INF、DLL、CAT，记录这三份实际文件的摘要，并打印其 INF 路径。若 Windows 复用了同一份 INF 的旧包，会明确报告「复用」；不会把另一个构建的缓存摘要当成安装记录，也不会批量更新匹配设备。相同候选包和证书会复用本机的签名缓存，复用前再次验签；指纹记录在 `HKLM\SOFTWARE\XiaojiUmdf2LocalSigning`。
 
-只更新测试台或宿主不需要替换正在运行的驱动。要实际发布新的驱动 DLL，请提高 `driver/xiaoji.inf` 的 `DriverVer` 后重新构建、签名和安装。只重编 DLL 或重新签 CAT，不保证 Windows 会替换原有包。
+只更新管理器或宿主不需要替换正在运行的驱动。要实际发布新的驱动 DLL，请提高 `driver/xiaoji.inf` 的 `DriverVer` 后重新构建、签名和安装。只重编 DLL 或重新签 CAT，不保证 Windows 会替换原有包。
 
 **撤销测试信任：** `xiaoji-host remove` 只移除测试设备，不删除驱动包或证书。先在管理员 PowerShell 运行 `(Get-ItemProperty 'HKLM:\SOFTWARE\XiaojiUmdf2LocalSigning').Thumbprint` 核对实际指纹。确认不再测试后，在 `certlm.msc` 的“受信任的根证书颁发机构”和“受信任的发布者”中按该指纹移除证书；退役签名密钥时，再从“个人”删除对应证书及私钥。只有要重新初始化时才删除该项目专属的指纹记录。已签名包仍可能留在 Driver Store；不要按证书名称批量删除或强制删除其他设备的包。
 
-## 测试程序
+## 可选图形管理器
 
-**双击 `build/xiaoji-test.exe` 打开中文图形测试台。** 不需要终端、同目录的宿主或 WDK；目标为 x64 Windows、.NET Framework 4.8。打开窗口不自动执行操作。
+**双击 `build/xiaoji-gui.exe` 打开图形管理器。** `build/xiaoji.exe` 是独立命令行，不打开窗口；安装、卸载、验签和状态查询见[命令行指南](cli.md)。GUI 目标为 x64 Windows、.NET Framework 4.8。打开窗口不会自动安装、签名或发送输入。发送键鼠输入需要管理员权限。
 
 1. 点「离线自检」检查内嵌包，或点「设备状态」查看在线节点；状态和日志都在窗口内。
 2. 在你控制的电脑上，以管理员身份点「安装驱动」。首次建立整机证书信任需要单独确认。安装将签名包加入 Driver Store，并创建或复用两个固定的 PnP 节点；成功时键盘、鼠标都已启动。
@@ -82,11 +84,9 @@ build/xiaoji-test-cli.exe
 
 「验证安装」先验签实际绑定的 Driver Store 包，再显示已启动设备数及是否与本构建逐字节一致。同一 INF 下已验签的不同构建不是签名错误；没有本构建的签名缓存时显示「未比对当前构建」，不会要求为验证重装。没有活动设备时可以验证已暂存的包，但不会把暂存报告为设备已启动。
 
-从旧测试台迁移时，请先关闭旧程序，再在新窗口点「安装驱动」。已有节点只有在固定实例、硬件 ID、控制器索引和本机签名包均符合预期时才会复用；没有归属标记的旧配置还须匹配原始键鼠描述符、VID/PID 和报告长度。不会为了发送按键重新注册节点，也不批量清扫历史 OEM 包。
+**按键连发：** 在 GUI 选择一个字母键（A–Z，不附加 Shift）、数字键或空格，设置次数（1–1000）和间隔（10–5000 ms），点「开始连发」。默认是 X 键、10 次、100 ms。间隔从上一次释放确认后算起，不是固定频率；最后一次不再等待。输入直接进入当前桌面，不弹窗、不更改设备安装状态。
 
-**按键连发测试：** 在 GUI 选择一个字母键（A–Z，不附加 Shift）、数字键或空格，设置次数（1–1000）和间隔（10–5000 ms），点「开始连发」。默认是 X 键、10 次、100 ms。间隔从上一次释放确认后算起，不是固定频率；最后一次不再等待。输入直接进入当前桌面，不弹窗、不更改设备安装状态。
-
-旧窗口仍在使用构建产物时，可设置 `XIAOJI_OUT_DIR` 为独立输出目录（如 `x64\repeat`）再构建。新窗口运行该目录里的 `xiaoji-test.exe`，无需重装驱动。
+如果运行中的管理器占用了构建产物，可以设置 `XIAOJI_OUT_DIR` 为独立输出目录（如 `x64\gui-dev`）后重新构建。
 
 进行中可点「停止连发」，关窗也会请求停止并等待宿主退出。正在进行的点按会先尝试释放；显示的完成次数只统计 HID 已确认按下和释放的点按，不代表前台应用实际接收次数。若 HID 确认超时，程序报错并停止，不重试点按。`xiaoji-host.exe repeat-test` 可在私有共享内存中检查连发和取消，不操作桌面。
 
@@ -109,6 +109,8 @@ build/xiaoji-test-cli.exe
 退出码：`0` 本项通过；`1` 检查或安装器失败；`2` 参数错误或在 `INSTALL` 确认处取消；`3` 没有设备、未收到目标输入或提前关闭观察窗口。
 
 ## 设备与协议
+
+第三方程序请使用 [客户端 SDK 与调用示例](developer.md)，无需自行创建下列内部命名对象；共享内存布局不是面向业务程序的公共 ABI。
 
 - 硬件 ID：`ROOT\XIAOJI`
 - 默认实例：`ROOT\XIAOJI\KBD0001`、`ROOT\XIAOJI\MOU0001`

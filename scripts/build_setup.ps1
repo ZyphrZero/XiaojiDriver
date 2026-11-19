@@ -25,8 +25,8 @@ $setupSources = "$repoRoot\host\LocalSetup.cs", "$repoRoot\host\DriverStore.cs"
 $sources = $setupSources + @("$repoRoot\tests\XiaojiTest.cs", "$repoRoot\tests\InputObserver.cs")
 if ($Gui) {
     $resources += EmbeddedFile $OutDir 'xiaoji-host.exe'
-    $entry = '/target:winexe','/main:TestWindow',"/out:$OutDir\xiaoji-test.exe"
-    $sources += "$repoRoot\tests\TestWindow.cs"
+    $entry = '/target:winexe','/main:DriverWindow',"/out:$OutDir\xiaoji-gui.exe"
+    $sources += "$repoRoot\app\DriverWindow.cs"
 } else {
     & $compiler @flags "/out:$OutDir\xiaoji-setup.exe" @resources @setupSources
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
