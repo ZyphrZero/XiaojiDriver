@@ -71,9 +71,11 @@ powershell.exe -NoProfile -STA -File .\scripts\xiaoji_gui_smoke.ps1
 
 ## 发布未签名预览包
 
-推送到 `main`、`feature/**` 或向 `main` 提交 PR 时，GitHub Actions 在 Windows x64 上编译驱动、生成 CAT 并校验 ZIP 内容。普通提交和手动运行只生成 Actions 构件，不创建 Release。
+推送到 `main`、`feature/**` 或向 `main` 提交 PR 时，GitHub Actions 在 Windows x64 上编译驱动、生成 CAT 并校验 ZIP 内容。普通提交和不指定标签的手动运行只生成 Actions 构件，不创建 Release。
 
 发布标签和附件名使用仓库根目录 [`VERSION`](VERSION) 中的三段产品版本号。在已进入 `main` 的提交上创建对应标签，例如 `git tag v0.1.0 <提交哈希>`，再运行 `git push origin refs/tags/v0.1.0`。工作流验证通过后才创建 GitHub **Pre-release**，不会覆盖已发布版本。
+
+发布任务在同一台 Windows runner 上从标签源码构建、测试、核对 SHA-256 并直接上传附件，无需跨任务下载构件。如果标签已推送但尚未发布，可从 `main` 执行 `gh workflow run driver-release.yml --ref main -f release_tag=v0.1.0` 来使用最新流程重跑；打包的源码仍是原标签，不需要删除或移动标签。
 
 Windows 驱动单独使用四段版本号：产品 `0.1.0` 包含的驱动版本为 `1.0.0.1`。打包时仍会检查 `driver/xiaoji.inf` 的 `DriverVer` 与驱动 DLL 文件版本一致。
 

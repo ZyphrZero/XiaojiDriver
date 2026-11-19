@@ -1,0 +1,91 @@
+name: Build driver packages
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        type: string
+        default: ''
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.release_tag && format('refs/tags/{0}', inputs.release_tag) || '' }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the release tag and its commit before running build scripts
+        if: inputs.release_tag != ''
+        shell: bash
+        env:
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$TAG^{commit}")"
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+          fi
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
+
+      - name: Build the x64 UMDF driver and catalog
+        shell: cmd
+        run: scripts\build.cmd x64 driver package
+
+      - name: Build the standalone client SDK
+        shell: cmd
+        run: scripts\build.cmd x64 sdk
+
+      - name: Build the standalone management CLI
+        shell: cmd
+        run: scripts\build.cmd x64 cli
+
+      - name: Check CLI without installing any devices
+        shell: pwsh
+        run: ./scripts/xiaoji_cli_smoke.ps1 -UnsignedInf x64/driver/xiaoji.inf
+
+      - name: Check the public ABI without desktop input
+        shell: cmd
+        run: python -B tests\client_smoke.py x64\sdk
+
+      - name: Test Rust bindings without desktop input
+        shell: pwsh
+        run: |
+          $env:XIAOJI_SDK_DIR = (Resolve-Path x64/sdk).Path
+          $env:PATH = "$env:XIAOJI_SDK_DIR;$env:PATH"
+          cargo test --offline --locked --target x86_64-pc-windows-msvc --manifest-path sdk/rust/Cargo.toml --all-targets
+
+      - name: Verify and package driver and client SDK separately
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: ./scripts/package_release.ps1 -SdkDir x64/sdk -CliDir x64/cli -Tag $env:RELEASE_TAG -OutputDir "$env:RUNNER_TEMP/release"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        if: inputs.release_tag == ''
+        with:
+          name: unsigned-driver-x64
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish unsigned developer pre-release
+        if: inputs.release_tag != ''
+        shell: bash
+        working-directory: ${{ runner.temp }}/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          sha256sum --check SHA256SUMS.txt
+          archive="xiaoji-driver-${TAG#v}-win-x64-unsigned.zip"
+          sdk="xiaoji-client-sdk-${TAG#v}-win-x64.zip"
+          cli="xiaoji-cli-${TAG#v}-win-x64.zip"
+          gh release create "$TAG" "$archive" "$sdk" "$cli" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --prerelease --latest=false --title "xiaoji $TAG · x64 未签名预览版" \
+            --notes '驱动包未签名，不是可直接安装的正式驱动。独立 CLI 可安装受信任的已签名包、查询状态或卸载；客户端 SDK 用于业务程序调用。附件不包含 GUI、证书或微软 SDK/WDK 工具。'
