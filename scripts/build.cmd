@@ -122,11 +122,13 @@ if errorlevel 1 exit /b 1
 
 call :core host_with_tests /DXIAOJI_SESSION_TEST
 if errorlevel 1 exit /b 1
+call :signing signing_with_tests /DXIAOJI_SESSION_TEST
+if errorlevel 1 exit /b 1
 cl.exe /nologo /W4 /O2 /MT /EHsc /std:c++17 /D XIAOJI_CLIENT_STATIC ^
     /Fo"%OUT_DIR%\client_static.obj" /c "%XIAOJI_ROOT%\sdk\xiaoji_client.cpp"
 if errorlevel 1 exit /b 1
 link.exe /nologo /SUBSYSTEM:CONSOLE /MACHINE:X64 /OUT:"%OUT_DIR%\xiaoji-host.exe" ^
-    "%OUT_DIR%\host_with_tests.obj" "%OUT_DIR%\client_static.obj" "%OUT_DIR%\local_install.obj" "%OUT_DIR%\setup.res" setupapi.lib cfgmgr32.lib newdev.lib advapi32.lib shell32.lib ole32.lib uuid.lib user32.lib
+    "%OUT_DIR%\host_with_tests.obj" "%OUT_DIR%\signing_with_tests.obj" "%OUT_DIR%\client_static.obj" "%OUT_DIR%\local_install.obj" "%OUT_DIR%\setup.res" setupapi.lib cfgmgr32.lib newdev.lib advapi32.lib shell32.lib ole32.lib uuid.lib user32.lib ncrypt.lib crypt32.lib wintrust.lib bcrypt.lib
 if errorlevel 1 exit /b 1
 
 echo Compiling optional xiaoji-gui.exe ...
@@ -160,9 +162,16 @@ exit /b %errorlevel%
 call :core xiaoji_host
 if errorlevel 1 exit /b 1
 :link_cli
+call :signing local_signing
+if errorlevel 1 exit /b 1
 cl.exe /nologo /W4 /O1 /Gy /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE ^
-    /Fo"%OUT_DIR%\management_cli.obj" /Fe"%OUT_DIR%\xiaoji.exe" "%HOST_DIR%\management_cli.cpp" "%OUT_DIR%\xiaoji_host.obj" ^
-    /link /SUBSYSTEM:CONSOLE /OPT:REF shell32.lib user32.lib ole32.lib uuid.lib wintrust.lib
+    /Fo"%OUT_DIR%\management_cli.obj" /Fe"%OUT_DIR%\xiaoji.exe" "%HOST_DIR%\management_cli.cpp" "%OUT_DIR%\xiaoji_host.obj" "%OUT_DIR%\local_signing.obj" ^
+    /link /SUBSYSTEM:CONSOLE /OPT:REF shell32.lib user32.lib ole32.lib uuid.lib wintrust.lib ncrypt.lib crypt32.lib bcrypt.lib
+exit /b %errorlevel%
+
+:signing
+cl.exe /nologo /W4 /O1 /Gy /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE %2 ^
+    /Fo"%OUT_DIR%\%~1.obj" /c "%HOST_DIR%\local_signing.cpp"
 exit /b %errorlevel%
 
 :client

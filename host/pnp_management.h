@@ -2,8 +2,11 @@
 
 #include <functional>
 #include <string>
+#include <stdexcept>
 
 namespace xiaoji {
+struct IdentityMismatch : std::runtime_error { using std::runtime_error::runtime_error; };
+struct NotStarted : std::runtime_error { using std::runtime_error::runtime_error; };
 enum class LayoutVersion { current, legacy, unknown };
 struct RunningLayout {
     LayoutVersion version;

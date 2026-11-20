@@ -14,7 +14,7 @@ cd .\x64\cli
 .\xiaoji.exe verify
 ```
 
-签名包须包含 INF、DLL 和 CAT，CLI 不替包签名。卸载前可用 `uninstall --dry-run` 预览，再在管理员终端执行 `uninstall`；`uninstall --keep-package` 只移除设备及配置。完整参数、退出码和本地测试签名方式见[命令行指南](docs/cli.md)。
+默认的 `install <INF>` 要求同目录有可信的已签名包（INF、DLL、CAT），不替包签名。宿主也可在用户**明确同意整机信任本机证书**后，调用 `install --local-sign <目录> --trust-local-certificate --json`，使用 Windows API 签名并安装未签名包；目标机不需要 .NET、SignTool 或 Inf2Cat。卸载前可用 `uninstall --dry-run` 预览；`uninstall --keep-package` 只移除设备及配置。完整参数、退出码与程序接口见[命令行指南](docs/cli.md)。
 
 新版设备的键盘报文可同时表示全部支持的按键，鼠标支持 5 键；已安装的机器需用新版 CLI 再执行一次 `install <已签名 INF>` 升级布局。现有 ABI 1 输入接口不变。
 

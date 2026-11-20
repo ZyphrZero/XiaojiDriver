@@ -26,6 +26,13 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "private IPC repeat-test exit=$LASTEXITCODE" }
         & $exe session-test
         if ($LASTEXITCODE -ne 0) { throw "private IPC session-test exit=$LASTEXITCODE" }
+        $beforeSigning = @(Get-TrustSnapshot) -join ';'
+        try {
+            & (Join-Path $binaryDir 'xiaoji-host.exe') signing-test
+            if ($LASTEXITCODE -ne 0) { throw "ephemeral signing-test exit=$LASTEXITCODE" }
+        } finally {
+            if ($beforeSigning -cne (@(Get-TrustSnapshot) -join ';')) { throw 'signing-test changed machine signing state' }
+        }
         $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         if ($principal.IsInRole([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
             $token = [guid]::NewGuid().ToString('N')

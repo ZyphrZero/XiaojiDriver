@@ -16,6 +16,7 @@ extern "C" {
 #include "installed_input.h"
 #include "pnp_management.h"
 #ifdef XIAOJI_SESSION_TEST
+#include "local_signing.h"
 #define XIAOJI_CLIENT_STATIC
 #include "../sdk/xiaoji_client.h"
 #endif
@@ -684,11 +685,12 @@ bool CheckSlotOwner(HKEY key, int index, bool allowLegacy) {
         };
         if (ReadStoredLayout(key, index) == LayoutVersion::unknown || !matchesDword(L"VendorId", 0x1209) ||
             !matchesDword(L"ProductId", index + 1) || !matchesDword(L"FunctionMode", 0))
-            throw std::runtime_error("Legacy slot does not match a known xiaoji controller configuration.");
+            throw IdentityMismatch("Legacy slot does not match a known xiaoji controller configuration.");
         return false;
     }
+    if (rc == ERROR_ACCESS_DENIED) throw std::runtime_error("Cannot read controller owner: access denied");
     if (rc != ERROR_SUCCESS || _wcsicmp(owner, index == 0 ? kKeyboardInstance : kMouseInstance) != 0)
-        throw std::runtime_error("Controller slot has an unknown owner; not changing it.");
+        throw IdentityMismatch("Controller slot has an unknown owner; not changing it.");
     return true;
 }
 
@@ -725,32 +727,43 @@ std::wstring BoundOem(int index, bool requireStarted, const std::wstring& allowe
     if (rc != CR_SUCCESS) throw std::runtime_error("CM_Locate_DevNode failed: " + std::to_string(rc));
     wchar_t hardware[256]{};
     ULONG size = sizeof(hardware), type = 0;
-    if (CM_Get_DevNode_Registry_PropertyW(node, CM_DRP_HARDWAREID, &type, hardware, &size, 0) != CR_SUCCESS ||
+    rc = CM_Get_DevNode_Registry_PropertyW(node, CM_DRP_HARDWAREID, &type, hardware, &size, 0);
+    if (rc != CR_SUCCESS && rc != CR_NO_SUCH_VALUE && rc != CR_BUFFER_SMALL) throw std::runtime_error("Cannot query hardware ID: " + std::to_string(rc));
+    if (rc != CR_SUCCESS ||
         type != REG_MULTI_SZ || size < sizeof(kHardwareId) + sizeof(wchar_t) || hardware[ARRAYSIZE(kHardwareId)-1] != 0 ||
-        _wcsicmp(hardware, kHardwareId) != 0 || !OwnedConfig(index, !allowedInfs.empty())) throw std::runtime_error("Device identity mismatch: " + Narrow(instance));
+        _wcsicmp(hardware, kHardwareId) != 0 || !OwnedConfig(index, !allowedInfs.empty())) throw IdentityMismatch("Device identity mismatch: " + Narrow(instance));
     DWORD boundIndex = MAXDWORD, bytes = sizeof(boundIndex);
     std::wstring parameters = L"SYSTEM\\CurrentControlSet\\Enum\\" + instance + L"\\Device Parameters";
-    if (RegGetValueW(HKEY_LOCAL_MACHINE, parameters.c_str(), L"ControllerIndex", RRF_RT_REG_DWORD, nullptr, &boundIndex, &bytes) != ERROR_SUCCESS ||
-        boundIndex != static_cast<DWORD>(index)) throw std::runtime_error("Controller index mismatch.");
+    auto read = RegGetValueW(HKEY_LOCAL_MACHINE, parameters.c_str(), L"ControllerIndex", RRF_RT_REG_DWORD, nullptr, &boundIndex, &bytes);
+    if (read == ERROR_ACCESS_DENIED) throw std::runtime_error("Cannot read controller index: access denied");
+    if (read != ERROR_SUCCESS || boundIndex != static_cast<DWORD>(index)) throw IdentityMismatch("Controller index mismatch.");
     const DEVPROPKEY driverInf = {{0xa8b865dd,0x2e3d,0x4094,{0xad,0x97,0xe5,0x93,0xa7,0x0c,0x75,0xd6}},5};
     wchar_t bound[MAX_PATH]{};
     size = sizeof(bound);
     DEVPROPTYPE propType = 0;
     rc = CM_Get_DevNode_PropertyW(node, &driverInf, &propType, reinterpret_cast<BYTE*>(bound), &size, 0);
     if (rc == CR_NO_SUCH_VALUE && !requireStarted && OwnedConfig(index)) return L"<unbound>";
+    if (rc != CR_SUCCESS && rc != CR_NO_SUCH_VALUE && rc != CR_BUFFER_SMALL) throw std::runtime_error("Cannot query bound driver package: " + std::to_string(rc));
     if (rc != CR_SUCCESS || propType != DEVPROP_TYPE_STRING || size < 4 || size > sizeof(bound) || bound[size/2-1] != 0)
-        throw std::runtime_error("Cannot identify the bound driver package.");
+        throw IdentityMismatch("Cannot identify the bound driver package.");
     std::wstring oem = CharLowerW(bound);
     wchar_t storeInf[MAX_PATH]{};
-    if (!SetupGetInfDriverStoreLocationW(oem.c_str(), nullptr, nullptr, storeInf, MAX_PATH, nullptr) ||
-        _wcsicmp(std::filesystem::path(storeInf).filename().c_str(), L"xiaoji.inf") != 0)
-        throw std::runtime_error("The fixed instance is bound to an unknown driver package.");
+    if (!SetupGetInfDriverStoreLocationW(oem.c_str(), nullptr, nullptr, storeInf, MAX_PATH, nullptr)) {
+        auto error = GetLastError();
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND && error != ERROR_NOT_FOUND)
+            throw std::runtime_error("Cannot resolve bound driver: " + Win32Message(error));
+        throw IdentityMismatch("The bound driver package is missing.");
+    }
+    if (_wcsicmp(std::filesystem::path(storeInf).filename().c_str(), L"xiaoji.inf") != 0)
+        throw IdentityMismatch("The fixed instance is bound to an unknown driver package.");
     if (!allowedInfs.empty() && allowedInfs.find(L"," + oem + L",") == std::wstring::npos)
         throw std::runtime_error("Bound OEM driver differs from the selected package: " + Narrow(oem));
     if (requireStarted) {
         ULONG flags = 0, problem = 0;
-        if (CM_Get_DevNode_Status(&flags, &problem, node, 0) != CR_SUCCESS || !(flags & DN_STARTED) || problem != 0)
-            throw std::runtime_error("Device not started: " + Narrow(instance) + ", problem=" + std::to_string(problem));
+        rc = CM_Get_DevNode_Status(&flags, &problem, node, 0);
+        if (rc != CR_SUCCESS) throw std::runtime_error("Cannot query devnode status: " + std::to_string(rc));
+        if (!(flags & DN_STARTED) || problem != 0)
+            throw NotStarted("Device not started: " + Narrow(instance) + ", problem=" + std::to_string(problem));
     }
     return oem;
 }
@@ -1524,6 +1537,14 @@ int RunXiaojiHost(int argc, char** argv, int (*installEmbeddedPackage)(bool)) {
         if (command == "repeat-test" && argc == 2) { RepeatTest(); return 0; }
 #ifdef XIAOJI_SESSION_TEST
         if (command == "session-test" && argc == 2) { SessionTest(); return 0; }
+        if (command == "signing-test" && argc == 2) {
+            std::wstring path(32768, L'\0');
+            auto length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+            if (!length || length >= path.size()) Fail("Locate signing-test package");
+            path.resize(length);
+            SigningTest(std::filesystem::path(path).parent_path());
+            return 0;
+        }
 #endif
         if (command == "install" && (argc == 2 || (argc == 3 && std::string(argv[2]) == "--check")))
             return installEmbeddedPackage(argc == 3);

@@ -53,6 +53,14 @@ build/xiaoji-test-cli.exe
 
 ## 测试机本地签名
 
+**宿主调用（无需开发工具）：** `xiaoji.exe install --local-sign <驱动包目录> --trust-local-certificate --json` 只用 Windows 自带 API。宿主先验证插件来源、取得用户对整机信任的明确确认，然后以管理员身份启动 CLI。CLI 在 Program Files 中的管理员/SYSTEM 专用目录核对副本，签 DLL 和构建时已生成的 CAT（SHA-256，不联网加时间戳），验证两份签名和 INF、DLL 的目录成员关系后再暂存。它不重新生成 CAT，也不改原始包。
+
+CLI 与 GUI 共用 `HKLM\SOFTWARE\XiaojiUmdf2LocalSigning` 中的 `Thumbprint` 和 `CN=xiaoji UMDF2 Local Test` 证书。CLI 复用有效证书并补齐缺失的 Root / TrustedPublisher 公钥；只有首次安装或证书明确过期才新建。CLI 新证书有效期 **10 年**，减少无时间戳签名因过期而无法重装的情况；不会延长既有 GUI 证书的有效期。记录存在而个人证书、私钥或身份不符时停止，不另建根。该信任不能替代 Microsoft 签名，也不会改变 Secure Boot 或 TESTSIGNING。
+
+`xiaoji.exe uninstall --json --remove-local-trust` 先移除固定设备、配置和绑定包；只在确认设备及包均已删除后，才清理 CLI 登记的签名缓存、三个 LocalMachine 存储中指纹和主题匹配的条目、对应私钥及项目注册表键。整键删除包括 GUI 的卸载记录 `InstalledHashes`（`REG_MULTI_SZ`）：它记录的包已确认不再发布，GUI 不再需要这些摘要。若键内有未知值或任何子键，CLI 报错并保留缓存、证书、私钥及注册表记录。不会清理旧 GUI 创建的未登记缓存。**GUI 也会失去对这张证书的信任。** 不带此开关时保留签名状态。[宿主协议与错误处理](cli.md#供程序调用json)。
+
+**开发用内嵌安装器（原 .NET 路径）：**
+
 先检查当前 EXE 的内嵌包。这个命令会在临时目录运行真正的 SignTool 和 Inf2Cat，不创建证书、不访问 Driver Store、不发送输入：
 
 ```powershell
