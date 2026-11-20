@@ -6,6 +6,10 @@
 #include <aclapi.h>
 #include <setupapi.h>
 #include <cfgmgr32.h>
+extern "C" {
+#include <hidsdi.h>
+#include <hidusage.h>
+}
 #include <newdev.h>
 #include <shlobj.h>
 #include "host_entry.h"
@@ -13,6 +17,7 @@
 #include "pnp_management.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <charconv>
 #include <functional>
@@ -31,6 +36,7 @@
 
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
+#pragma comment(lib, "hid.lib")
 #pragma comment(lib, "newdev.lib")
 #pragma comment(lib, "advapi32.lib")
 
@@ -78,7 +84,15 @@ static_assert(offsetof(InputAck, release) == 16, "input acknowledgement release 
 
 constexpr LONG kAckDelivered = 0x00000001;
 
-const BYTE kKeyboardDescriptor[] = {
+// ABI 1 uses the first 8 bytes (modifiers, reserved, six usages). The driver
+// zero-extends short frames, so the appended bitmap is clear for old writers.
+constexpr DWORD kLegacyKeyboardBytes = 8;
+constexpr BYTE kBitmapUsages = 160;
+constexpr DWORD kKeyboardBytes = kLegacyKeyboardBytes + kBitmapUsages / 8;
+constexpr DWORD kMouseBytes = 4;
+constexpr BYTE kLegacyMouseButtons = 3, kMouseButtons = 5;
+
+constexpr BYTE kLegacyKeyboardDescriptor[] = {
     0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x05, 0x07,
     0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
     0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01,
@@ -89,15 +103,55 @@ const BYTE kKeyboardDescriptor[] = {
     0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0,
 };
 
-const BYTE kMouseDescriptor[] = {
+constexpr auto kKeyboardDescriptor = [] {
+    constexpr BYTE tail[] = {
+        0x05, 0x07, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, kBitmapUsages,
+        0x19, 0x00, 0x29, kBitmapUsages - 1, 0x81, 0x02, 0xC0,
+    };
+    constexpr size_t prefix = sizeof(kLegacyKeyboardDescriptor) - 1; // before End Collection
+    std::array<BYTE, prefix + sizeof(tail)> descriptor{};
+    for (size_t pos = 0; pos < prefix; ++pos) descriptor[pos] = kLegacyKeyboardDescriptor[pos];
+    for (size_t pos = 0; pos < sizeof(tail); ++pos) descriptor[prefix + pos] = tail[pos];
+    return descriptor;
+}();
+
+// Button bits grow into the padding; relative X, Y and wheel stay at bytes 1..3.
+template<BYTE Buttons> constexpr BYTE MouseDescriptor[] = {
     0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01,
-    0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
-    0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01,
-    0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x03,
+    0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, Buttons,
+    0x15, 0x00, 0x25, 0x01, 0x95, Buttons, 0x75, 0x01,
+    0x81, 0x02, 0x95, 0x01, 0x75, 8 - Buttons, 0x81, 0x03,
     0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
     0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x03,
     0x81, 0x06, 0xC0, 0xC0,
 };
+
+struct ReportLayout {
+    const BYTE* descriptor;
+    DWORD size;
+    DWORD inputBytes;
+};
+constexpr ReportLayout kCurrentLayouts[] = {
+    {kKeyboardDescriptor.data(), static_cast<DWORD>(kKeyboardDescriptor.size()), kKeyboardBytes},
+    {MouseDescriptor<kMouseButtons>, sizeof(MouseDescriptor<kMouseButtons>), kMouseBytes},
+};
+constexpr ReportLayout kLegacyLayouts[] = {
+    {kLegacyKeyboardDescriptor, sizeof(kLegacyKeyboardDescriptor), kLegacyKeyboardBytes},
+    {MouseDescriptor<kLegacyMouseButtons>, sizeof(MouseDescriptor<kLegacyMouseButtons>), kMouseBytes},
+};
+
+bool MatchesLayout(const ReportLayout& stored, const ReportLayout& expected) {
+    return stored.inputBytes == expected.inputBytes && stored.size == expected.size &&
+        std::memcmp(stored.descriptor, expected.descriptor, expected.size) == 0;
+}
+
+LayoutVersion ClassifyConfig(int index, const ReportLayout& stored) {
+    if (MatchesLayout(stored, kCurrentLayouts[index])) return LayoutVersion::current;
+    if (MatchesLayout(stored, kLegacyLayouts[index])) return LayoutVersion::legacy;
+    return LayoutVersion::unknown;
+}
+
+bool NeedsLayoutRewrite(LayoutVersion stored) { return stored != LayoutVersion::current; }
 
 std::string Narrow(const std::wstring& value) {
     if (value.empty()) return {};
@@ -255,14 +309,13 @@ std::wstring ControllerKey(int index) {
     return L"SOFTWARE\\Xiaoji\\Controller" + std::to_wstring(index);
 }
 
-void WriteControllerConfig(
-    int index,
-    const BYTE* reportDescriptor,
-    DWORD reportDescriptorSize,
-    DWORD inputReportByteLength,
-    WORD vendorId,
-    WORD productId,
-    const std::wstring& productString) {
+void WriteCurrentLayout(HKEY key, int index) {
+    const auto& layout = kCurrentLayouts[index];
+    SetBinaryValue(key, L"ReportDescriptor", layout.descriptor, layout.size);
+    SetDwordValue(key, L"InputReportByteLength", layout.inputBytes);
+}
+
+void WriteControllerConfig(int index, const std::wstring& productString) {
     HKEY key = nullptr;
     const std::wstring path = ControllerKey(index);
     DWORD disposition = 0;
@@ -279,11 +332,10 @@ void WriteControllerConfig(
                 _wcsicmp(owner, instance) != 0) throw std::runtime_error("Controller configuration is not owned by this instance.");
         }
         SetStringValue(key, L"OwnerInstance", instance);
-        SetBinaryValue(key, L"ReportDescriptor", reportDescriptor, reportDescriptorSize);
-        SetDwordValue(key, L"VendorId", vendorId);
-        SetDwordValue(key, L"ProductId", productId);
+        WriteCurrentLayout(key, index);
+        SetDwordValue(key, L"VendorId", 0x1209);
+        SetDwordValue(key, L"ProductId", index + 1);
         SetDwordValue(key, L"VersionNumber", 0x0100);
-        SetDwordValue(key, L"InputReportByteLength", inputReportByteLength);
         SetDwordValue(key, L"FunctionMode", 0);
         SetStringValue(key, L"ProductString", productString);
     } catch (...) {
@@ -571,34 +623,64 @@ private:
     InputAck* ackView_;
 };
 
-bool OwnedConfig(int index, bool allowLegacy = false) {
+LayoutVersion ReadStoredLayout(HKEY key, int index) {
+    auto read = [&](const wchar_t* name, DWORD type, void* data, DWORD& bytes) {
+        auto rc = RegGetValueW(key, nullptr, name, type, nullptr, data, &bytes);
+        if (rc == ERROR_SUCCESS) return true;
+        if (rc == ERROR_FILE_NOT_FOUND || rc == ERROR_MORE_DATA || rc == ERROR_UNSUPPORTED_TYPE ||
+            rc == ERROR_DATATYPE_MISMATCH) return false;
+        throw std::runtime_error("Read " + Narrow(name) + ": " + Win32Message(rc));
+    };
+    BYTE descriptor[std::max(kCurrentLayouts[0].size, kCurrentLayouts[1].size)]{};
+    DWORD size = sizeof(descriptor), length = 0, bytes = sizeof(length);
+    if (!read(L"ReportDescriptor", RRF_RT_REG_BINARY, descriptor, size) ||
+        !read(L"InputReportByteLength", RRF_RT_REG_DWORD, &length, bytes) || bytes != sizeof(length))
+        return LayoutVersion::unknown;
+    return ClassifyConfig(index, {descriptor, size, length});
+}
+
+// Return false only for a positively identified slot predating OwnerInstance.
+bool CheckSlotOwner(HKEY key, int index, bool allowLegacy) {
     wchar_t owner[128]{};
     DWORD size = sizeof(owner);
-    auto path = ControllerKey(index);
-    HKEY key{};
-    auto rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
-    if (rc == ERROR_FILE_NOT_FOUND || rc == ERROR_PATH_NOT_FOUND) return false;
-    if (rc != ERROR_SUCCESS) throw std::runtime_error("Read controller configuration: " + Win32Message(rc));
-    rc = RegGetValueW(key, nullptr, L"OwnerInstance", RRF_RT_REG_SZ, nullptr, owner, &size);
+    auto rc = RegGetValueW(key, nullptr, L"OwnerInstance", RRF_RT_REG_SZ, nullptr, owner, &size);
     if (rc == ERROR_FILE_NOT_FOUND && allowLegacy) {
-        BYTE descriptor[sizeof(kKeyboardDescriptor) + sizeof(kMouseDescriptor)]{};
-        size = sizeof(descriptor);
-        const auto expectedSize = index == 0 ? sizeof(kKeyboardDescriptor) : sizeof(kMouseDescriptor);
-        bool match = RegGetValueW(key, nullptr, L"ReportDescriptor", RRF_RT_REG_BINARY, nullptr, descriptor, &size) == ERROR_SUCCESS &&
-            size == expectedSize && std::memcmp(descriptor, index == 0 ? kKeyboardDescriptor : kMouseDescriptor, size) == 0;
         auto matchesDword = [&](const wchar_t* name, DWORD expected) {
             DWORD value = 0, bytes = sizeof(value);
             return RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, nullptr, &value, &bytes) == ERROR_SUCCESS && value == expected;
         };
-        match = match && matchesDword(L"VendorId", 0x1209) && matchesDword(L"ProductId", index + 1) &&
-            matchesDword(L"InputReportByteLength", index == 0 ? 8 : 4) && matchesDword(L"FunctionMode", 0);
-        RegCloseKey(key);
-        if (!match) throw std::runtime_error("Legacy slot does not match the original xiaoji controller configuration.");
-        return true;
+        if (ReadStoredLayout(key, index) == LayoutVersion::unknown || !matchesDword(L"VendorId", 0x1209) ||
+            !matchesDword(L"ProductId", index + 1) || !matchesDword(L"FunctionMode", 0))
+            throw std::runtime_error("Legacy slot does not match a known xiaoji controller configuration.");
+        return false;
     }
-    RegCloseKey(key);
     if (rc != ERROR_SUCCESS || _wcsicmp(owner, index == 0 ? kKeyboardInstance : kMouseInstance) != 0)
         throw std::runtime_error("Controller slot has an unknown owner; not changing it.");
+    return true;
+}
+
+using ControllerHandle = std::unique_ptr<HKEY__, decltype(&RegCloseKey)>;
+
+bool OwnedConfig(int index, bool allowLegacy = false) {
+    HKEY key{};
+    auto rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ControllerKey(index).c_str(), 0, KEY_QUERY_VALUE | KEY_WOW64_64KEY, &key);
+    if (rc == ERROR_FILE_NOT_FOUND || rc == ERROR_PATH_NOT_FOUND) return false;
+    if (rc != ERROR_SUCCESS) throw std::runtime_error("Read controller configuration: " + Win32Message(rc));
+    ControllerHandle handle(key, RegCloseKey);
+    CheckSlotOwner(key, index, allowLegacy);
+    return true;
+}
+
+bool UpgradeBoundConfig(int index) {
+    HKEY key{};
+    auto rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ControllerKey(index).c_str(), 0,
+        KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
+    if (rc != ERROR_SUCCESS) throw std::runtime_error("Open bound controller: " + Win32Message(rc));
+    ControllerHandle handle(key, RegCloseKey);
+    if (!CheckSlotOwner(key, index, true))
+        SetStringValue(key, L"OwnerInstance", index == 0 ? kKeyboardInstance : kMouseInstance);
+    if (!NeedsLayoutRewrite(ReadStoredLayout(key, index))) return false;
+    WriteCurrentLayout(key, index);
     return true;
 }
 
@@ -663,6 +745,105 @@ void BindSelected(const std::wstring& instance, const std::wstring& oem) {
     SetupDiDestroyDeviceInfoList(devices);
 }
 
+static std::wstring HidChildPath(int index) {
+    auto check = [](CONFIGRET rc, const char* operation) {
+        if (rc != CR_SUCCESS) throw std::runtime_error(std::string(operation) + " (CONFIGRET " + std::to_string(rc) + ")");
+    };
+    DEVINST root{}, child{};
+    auto instance = index == 0 ? kKeyboardInstance : kMouseInstance;
+    check(CM_Locate_DevNodeW(&root, const_cast<wchar_t*>(instance), CM_LOCATE_DEVNODE_NORMAL), "Locate fixed root");
+    auto rc = CM_Get_Child(&child, root, 0);
+    if (rc == CR_NO_SUCH_DEVNODE) throw std::runtime_error("No child device under fixed root");
+    GUID hid{};
+    HidD_GetHidGuid(&hid);
+    std::wstring path;
+    for (; rc != CR_NO_SUCH_DEVNODE; rc = CM_Get_Sibling(&child, child, 0)) {
+        check(rc, "Enumerate child nodes");
+        wchar_t id[MAX_DEVICE_ID_LEN]{};
+        check(CM_Get_Device_IDW(child, id, ARRAYSIZE(id), 0), "Read child instance ID");
+        ULONG chars = 0;
+        check(CM_Get_Device_Interface_List_SizeW(&chars, &hid, id, CM_GET_DEVICE_INTERFACE_LIST_PRESENT), "Size HID interface list");
+        std::vector<wchar_t> paths(chars);
+        check(CM_Get_Device_Interface_ListW(&hid, id, paths.data(), chars, CM_GET_DEVICE_INTERFACE_LIST_PRESENT), "Read HID interface list");
+        for (auto entry = paths.data(); *entry; entry += wcslen(entry) + 1) {
+            if (!path.empty()) throw std::runtime_error("Multiple active HID interfaces under fixed root");
+            path = entry;
+        }
+    }
+    if (path.empty()) throw std::runtime_error("No active HID interface on child nodes");
+    return path;
+}
+
+RunningLayout QueryRunningLayout(int index) {
+    try {
+        auto path = HidChildPath(index);
+        HANDLE raw = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (raw == INVALID_HANDLE_VALUE) Fail("Open HID interface for capabilities");
+        std::unique_ptr<void, decltype(&CloseHandle)> file(raw, CloseHandle);
+        PHIDP_PREPARSED_DATA data{};
+        if (!HidD_GetPreparsedData(raw, &data)) Fail("HidD_GetPreparsedData");
+        std::unique_ptr<_HIDP_PREPARSED_DATA, decltype(&HidD_FreePreparsedData)> preparsed(data, HidD_FreePreparsedData);
+        HIDP_CAPS caps{};
+        auto status = HidP_GetCaps(data, &caps);
+        if (status != HIDP_STATUS_SUCCESS) throw std::runtime_error("HidP_GetCaps status " + std::to_string(status));
+        if (caps.UsagePage != HID_USAGE_PAGE_GENERIC || caps.Usage != (index == 0 ? HID_USAGE_GENERIC_KEYBOARD : HID_USAGE_GENERIC_MOUSE))
+            throw std::runtime_error("Unexpected HID top-level collection");
+        // HIDP_CAPS includes the report ID placeholder, even for no-ID devices.
+        if (index == 0) {
+            if (caps.InputReportByteLength == kKeyboardBytes + 1) return {LayoutVersion::current, "nkro-28"};
+            if (caps.InputReportByteLength == kLegacyKeyboardBytes + 1) return {LayoutVersion::legacy, "legacy-8"};
+        } else if (caps.InputReportByteLength == kMouseBytes + 1) {
+            USHORT count = caps.NumberInputButtonCaps;
+            if (!count) throw std::runtime_error("No mouse input button capabilities");
+            std::vector<HIDP_BUTTON_CAPS> buttons(count);
+            status = HidP_GetButtonCaps(HidP_Input, buttons.data(), &count, data);
+            if (status != HIDP_STATUS_SUCCESS) throw std::runtime_error("HidP_GetButtonCaps status " + std::to_string(status));
+            const HIDP_BUTTON_CAPS* range = nullptr;
+            for (USHORT pos = 0; pos < count; ++pos) {
+                const auto& cap = buttons[pos];
+                if (cap.UsagePage != HID_USAGE_PAGE_BUTTON) continue;
+                if (range || !cap.IsRange || cap.Range.UsageMin != 1 || cap.ReportID != 0)
+                    throw std::runtime_error("Unexpected mouse button capabilities");
+                range = &cap;
+            }
+            if (!range) throw std::runtime_error("Mouse has no button-page range");
+            auto maximum = range->Range.UsageMax;
+            if (maximum == kMouseButtons) return {LayoutVersion::current, std::to_string(maximum)};
+            if (maximum == kLegacyMouseButtons) return {LayoutVersion::legacy, std::to_string(maximum)};
+            throw std::runtime_error("Unexpected mouse button UsageMax=" + std::to_string(maximum));
+        }
+        throw std::runtime_error("Unexpected HID InputReportByteLength=" + std::to_string(caps.InputReportByteLength));
+    } catch (const std::exception& error) { return {LayoutVersion::unknown, error.what()}; }
+}
+
+static void RestartDevice(const std::wstring& instance) {
+    HDEVINFO raw = SetupDiCreateDeviceInfoList(&kHidClassGuid, nullptr);
+    if (raw == INVALID_HANDLE_VALUE) Fail("Create device restart list");
+    std::unique_ptr<void, decltype(&SetupDiDestroyDeviceInfoList)> devices(raw, SetupDiDestroyDeviceInfoList);
+    SP_DEVINFO_DATA info{sizeof(info)};
+    if (!SetupDiOpenDeviceInfoW(raw, instance.c_str(), nullptr, 0, &info)) Fail("Open fixed device for restart");
+    // Microsoft Learn: SP_PROPCHANGE_PARAMS / DICS_PROPCHANGE stops and restarts
+    // the device. DIF_PROPERTYCHANGE targets this devnode, not its hardware ID.
+    SP_PROPCHANGE_PARAMS change{{sizeof(SP_CLASSINSTALL_HEADER), DIF_PROPERTYCHANGE}, DICS_PROPCHANGE, DICS_FLAG_CONFIGSPECIFIC, 0};
+    if (!SetupDiSetClassInstallParamsW(raw, &info, &change.ClassInstallHeader, sizeof(change)) ||
+        !SetupDiCallClassInstaller(DIF_PROPERTYCHANGE, raw, &info)) Fail("Restart " + Narrow(instance));
+    SP_DEVINSTALL_PARAMS_W params{sizeof(params)};
+    if (!SetupDiGetDeviceInstallParamsW(raw, &info, &params)) Fail("Check device restart flags");
+    if (params.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT))
+        throw std::runtime_error("Computer restart required to finish layout upgrade: " + Narrow(instance));
+}
+
+static void ConfirmCurrentLayout(int index, const std::wstring& instance) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    for (;;) {
+        auto layout = QueryRunningLayout(index);
+        if (layout.version == LayoutVersion::current) return;
+        if (std::chrono::steady_clock::now() >= deadline)
+            throw std::runtime_error("New layout not active on " + Narrow(instance) + ": " + layout.detail);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+}
+
 void EnsureDevices(const std::wstring& allowedInfs, const std::wstring& priorInfs) {
     auto target = allowedInfs.substr(1, allowedInfs.find(L',', 1) - 1);
     for (int index : {0, 1}) {
@@ -670,19 +851,25 @@ void EnsureDevices(const std::wstring& allowedInfs, const std::wstring& priorInf
         const std::wstring instance = index == 0 ? kKeyboardInstance : kMouseInstance;
         auto current = BoundOem(index, false, allowedInfs + priorInfs);
         if (current.empty()) {
-            if (index == 0) WriteControllerConfig(index, kKeyboardDescriptor, sizeof(kKeyboardDescriptor), 8, 0x1209, 1, product);
-            else WriteControllerConfig(index, kMouseDescriptor, sizeof(kMouseDescriptor), 4, 0x1209, 2, product);
+            WriteControllerConfig(index, product);
             CreateRootDevice(instance, product, index);
             BindSelected(instance, target);
         } else if (allowedInfs.find(L"," + current + L",") == std::wstring::npos) {
             BindSelected(instance, target);
         }
         if (BoundOem(index, true, allowedInfs).empty()) throw std::runtime_error("Installed device disappeared.");
-        HKEY key{};
-        auto rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE, ControllerKey(index).c_str(), 0, KEY_SET_VALUE | KEY_WOW64_64KEY, &key);
-        if (rc != ERROR_SUCCESS) throw std::runtime_error("Open controller: " + Win32Message(rc));
-        try { SetStringValue(key, L"OwnerInstance", instance); } catch (...) { RegCloseKey(key); throw; }
-        RegCloseKey(key);
+        if (!current.empty()) {
+            bool restart = UpgradeBoundConfig(index);
+            if (!restart) {
+                auto active = QueryRunningLayout(index).version;
+                if (active == LayoutVersion::current) continue;
+                // A prior install can have written the new config but failed to restart.
+                restart = active == LayoutVersion::legacy;
+            }
+            if (restart) RestartDevice(instance);
+        }
+        ConfirmCurrentLayout(index, instance);
+        if (BoundOem(index, true, allowedInfs).empty()) throw std::runtime_error("Device disappeared during layout confirmation.");
     }
 }
 
@@ -793,11 +980,73 @@ void RepeatInstalled(const std::wstring& allowedInfs, char** args) {
     std::cout << (finished ? "FINISHED " : "STOPPED ") << confirmed << std::endl;
 }
 
+struct DescriptorFacts {
+    unsigned inputBits{}, outputBits{}, leds{}, buttons{}, bitmapBits{};
+};
+
+static DescriptorFacts InspectDescriptor(const ReportLayout& layout) {
+    DescriptorFacts facts{};
+    unsigned size = 0, count = 0, page = 0, first = UINT_MAX, last = UINT_MAX;
+    for (DWORD pos = 0; pos < layout.size;) {
+        BYTE tag = layout.descriptor[pos++];
+        unsigned width = tag & 3;
+        if (width > 1 || pos + width > layout.size) throw std::runtime_error("Unexpected HID item in built-in descriptor");
+        unsigned value = width ? layout.descriptor[pos++] : 0;
+        switch (tag) {
+        case 0x05: page = value; break;
+        case 0x19: first = value; break;
+        case 0x29: last = value; break;
+        case 0x75: size = value; break;
+        case 0x95: count = value; break;
+        case 0x85: throw std::runtime_error("Built-in descriptor declares a report ID");
+        case 0x81:
+            if (value == 2 && size == 1 && first == 1 && last == count && page == HID_USAGE_PAGE_BUTTON && facts.inputBits == 0)
+                facts.buttons = count;
+            if (value == 2 && size == 1 && first == 0 && last + 1 == count && page == HID_USAGE_PAGE_KEYBOARD && facts.inputBits == 64)
+                facts.bitmapBits = count;
+            facts.inputBits += size * count;
+            break;
+        case 0x91:
+            if (value == 2 && size == 1 && first == 1 && last == count && page == HID_USAGE_PAGE_LED && facts.outputBits == 0)
+                facts.leds = count;
+            facts.outputBits += size * count;
+            break;
+        }
+        if ((tag & 0x0c) == 0) first = last = UINT_MAX;
+    }
+    return facts;
+}
+
+static void TestReportLayouts() {
+    auto keyboard = InspectDescriptor(kCurrentLayouts[0]), mouse = InspectDescriptor(kCurrentLayouts[1]);
+    if (keyboard.inputBits != 28 * 8 || keyboard.bitmapBits != 160 || keyboard.outputBits != 8 || keyboard.leds != 5)
+        throw std::runtime_error("Unexpected hybrid keyboard input or LED output");
+    if (mouse.inputBits != 4 * 8 || mouse.buttons != 5) throw std::runtime_error("Unexpected five-button mouse layout");
+    for (int index : {0, 1}) {
+        auto check = [&](ReportLayout config, LayoutVersion expected, bool rewrite) {
+            auto version = ClassifyConfig(index, config);
+            if (version != expected || NeedsLayoutRewrite(version) != rewrite)
+                throw std::runtime_error("Stored layout recognition or migration decision failed");
+        };
+        for (auto version : {LayoutVersion::legacy, LayoutVersion::current}) {
+            auto config = (version == LayoutVersion::legacy ? kLegacyLayouts : kCurrentLayouts)[index];
+            config.inputBytes = index == 1 ? 4 : version == LayoutVersion::legacy ? 8 : 28;
+            check(config, version, version == LayoutVersion::legacy);
+            auto wrongLength = config;
+            wrongLength.inputBytes = index == 1 ? 5 : version == LayoutVersion::legacy ? 28 : 8;
+            check(wrongLength, LayoutVersion::unknown, true);
+            std::vector<BYTE> modified(config.descriptor, config.descriptor + config.size);
+            modified.back() ^= 1;
+            config.descriptor = modified.data();
+            check(config, LayoutVersion::unknown, true);
+        }
+    }
+}
+
 void SelfTest() {
     if (sizeof(SharedInput) != 362 || sizeof(InputAck) != 688)
         throw std::runtime_error("IPC layout mismatch");
-    if (sizeof(kKeyboardDescriptor) == 0 || sizeof(kMouseDescriptor) == 0)
-        throw std::runtime_error("descriptor missing");
+    TestReportLayouts();
 
     const std::string sample = "xiaoji A1!\n";
     for (unsigned char character : sample) {

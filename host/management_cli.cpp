@@ -171,13 +171,21 @@ int Status(bool verify) {
         const char* label = index == 0 ? "keyboard" : "mouse";
         try {
             auto name = xiaoji::BoundOem(index, true, {});
+            const char* field = index == 0 ? ", layout: " : ", buttons: ";
             if (name.empty()) { std::cout << label << ": not present\n"; continue; }
             if (verify && !checked.count(name)) {
                 auto path = StoreInf(name);
                 VerifyPackage(path);
                 checked.emplace(name, path);
             }
-            std::cout << label << ": started, " << fs::path(name).string() << (verify ? " (catalog verified)" : "") << '\n';
+            auto layout = xiaoji::QueryRunningLayout(index);
+            std::cout << label << ": started, " << fs::path(name).string() << (verify ? " (catalog verified)" : "") << field;
+            if (layout.version == xiaoji::LayoutVersion::unknown) {
+                std::cout << "unknown (" << layout.detail << ")\n";
+                failed = true;
+            } else {
+                std::cout << layout.detail << (layout.version == xiaoji::LayoutVersion::legacy ? " (run install to upgrade)" : "") << '\n';
+            }
             ++ready;
         } catch (const std::exception& error) { std::cerr << label << ": " << error.what() << '\n'; failed = true; }
     }

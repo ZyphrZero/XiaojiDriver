@@ -16,6 +16,8 @@ cd .\x64\cli
 
 签名包须包含 INF、DLL 和 CAT，CLI 不替包签名。卸载前可用 `uninstall --dry-run` 预览，再在管理员终端执行 `uninstall`；`uninstall --keep-package` 只移除设备及配置。完整参数、退出码和本地测试签名方式见[命令行指南](docs/cli.md)。
 
+新版设备的键盘报文可同时表示全部支持的按键，鼠标支持 5 键；已安装的机器需用新版 CLI 再执行一次 `install <已签名 INF>` 升级布局。现有 ABI 1 输入接口不变。
+
 ## 构建和启动
 
 编译驱动需要 MSVC x64 工具和配套的 Windows SDK / WDK（含 UMDF 2.15）。在仓库根目录运行：
