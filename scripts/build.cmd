@@ -120,8 +120,13 @@ if errorlevel 1 exit /b 1
 call :link_cli
 if errorlevel 1 exit /b 1
 
+call :core host_with_tests /DXIAOJI_SESSION_TEST
+if errorlevel 1 exit /b 1
+cl.exe /nologo /W4 /O2 /MT /EHsc /std:c++17 /D XIAOJI_CLIENT_STATIC ^
+    /Fo"%OUT_DIR%\client_static.obj" /c "%XIAOJI_ROOT%\sdk\xiaoji_client.cpp"
+if errorlevel 1 exit /b 1
 link.exe /nologo /SUBSYSTEM:CONSOLE /MACHINE:X64 /OUT:"%OUT_DIR%\xiaoji-host.exe" ^
-    "%OUT_DIR%\xiaoji_host.obj" "%OUT_DIR%\local_install.obj" "%OUT_DIR%\setup.res" setupapi.lib cfgmgr32.lib newdev.lib advapi32.lib shell32.lib ole32.lib uuid.lib user32.lib
+    "%OUT_DIR%\host_with_tests.obj" "%OUT_DIR%\client_static.obj" "%OUT_DIR%\local_install.obj" "%OUT_DIR%\setup.res" setupapi.lib cfgmgr32.lib newdev.lib advapi32.lib shell32.lib ole32.lib uuid.lib user32.lib
 if errorlevel 1 exit /b 1
 
 echo Compiling optional xiaoji-gui.exe ...
@@ -147,12 +152,12 @@ echo PACKAGE CATALOG: %OUT_DIR%\xiaoji.cat
 exit /b 0
 
 :core
-cl.exe /nologo /W4 /O2 /Gy /Gw /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE ^
-    /Fo"%OUT_DIR%\xiaoji_host.obj" /c "%HOST_DIR%\xiaoji_host.cpp"
+cl.exe /nologo /W4 /O2 /Gy /Gw /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE %2 ^
+    /Fo"%OUT_DIR%\%~1.obj" /c "%HOST_DIR%\xiaoji_host.cpp"
 exit /b %errorlevel%
 
 :cli
-call :core
+call :core xiaoji_host
 if errorlevel 1 exit /b 1
 :link_cli
 cl.exe /nologo /W4 /O1 /Gy /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE ^
@@ -161,7 +166,7 @@ cl.exe /nologo /W4 /O1 /Gy /MT /EHsc /std:c++17 /D UNICODE /D _UNICODE ^
 exit /b %errorlevel%
 
 :client
-call :core
+call :core xiaoji_host
 if errorlevel 1 exit /b 1
 cl.exe /nologo /W4 /O2 /MT /EHsc /std:c++17 /D XIAOJI_CLIENT_BUILD ^
     /Fo"%OUT_DIR%\xiaoji_client.obj" /c "%XIAOJI_ROOT%\sdk\xiaoji_client.cpp"

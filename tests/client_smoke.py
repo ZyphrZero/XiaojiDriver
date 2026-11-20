@@ -52,6 +52,36 @@ class ClientSmoke(unittest.TestCase):
         self.assertEqual(native.XiaojiGetDevices(ctypes.byref(mask)), 0)
         self.assertEqual(native.XiaojiLastError(), b"")
 
+    def test_session_invalid_arguments_only(self):
+        native = self.client._dll
+        handle = ctypes.c_void_p
+        word = ctypes.c_uint32
+        for name, args in (
+            ("Open", (word, word, word, ctypes.POINTER(handle))),
+            ("Key", (handle, ctypes.c_uint8, ctypes.c_int)),
+            ("Button", (handle, word, ctypes.c_int)),
+            ("Wheel", (handle, ctypes.c_int32)),
+            ("Close", (handle,)),
+        ):
+            self.client._bind("XiaojiSession" + name, ctypes.c_int, *args)
+
+        for devices, ready, ack in ((0, 1, 1), (4, 1, 1), (1, 0, 1), (1, 10001, 1), (2, 1, 0), (2, 1, 2001)):
+            with self.subTest(devices=devices, ready=ready, ack=ack):
+                output = handle(1)
+                self.assertEqual(native.XiaojiSessionOpen(devices, ready, ack, ctypes.byref(output)), 1)
+                self.assertTrue(native.XiaojiLastError())
+                self.assertIsNone(output.value)
+        for function, args in (
+            (native.XiaojiSessionOpen, (1, 1, 1, None)),
+            (native.XiaojiSessionKey, (None, 4, 1)),
+            (native.XiaojiSessionButton, (None, 1, 1)),
+            (native.XiaojiSessionWheel, (None, 1)),
+            (native.XiaojiSessionClose, (None,)),
+        ):
+            with self.subTest(function=function.__name__):
+                self.assertEqual(function(*args), 1)
+                self.assertTrue(native.XiaojiLastError())
+
     def test_wrapper_rejects_overflow_before_ffi_conversion(self):
         with self.assertRaises(ValueError):
             self.client.tap(0x104)

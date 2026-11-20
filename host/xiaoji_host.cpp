@@ -15,9 +15,14 @@ extern "C" {
 #include "host_entry.h"
 #include "installed_input.h"
 #include "pnp_management.h"
+#ifdef XIAOJI_SESSION_TEST
+#define XIAOJI_CLIENT_STATIC
+#include "../sdk/xiaoji_client.h"
+#endif
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <charconv>
 #include <functional>
@@ -217,9 +222,9 @@ void CheckObjectOwner(HANDLE handle) {
 
 class OperationLock {
 public:
-    OperationLock() {
+    explicit OperationLock(const wchar_t* name = L"Global\\XiaojiHostOperation") {
         SecurityDescriptor security;
-        handle_ = CreateMutexW(security.Get(), FALSE, L"Global\\XiaojiHostOperation");
+        handle_ = CreateMutexW(security.Get(), FALSE, name);
         if (!handle_) Fail("CreateMutexW");
         try {
             CheckObjectOwner(handle_);
@@ -525,6 +530,18 @@ static_assert(NextSequence(0, 0) == 2 && NextSequence(2, 2) == 4);
 static_assert(NextSequence(0, 42) == 44 && NextSequence(45, 42) == 46);
 static_assert(NextSequence(0xfffffffeUL, 0xfffffffcUL) == 2 && NextSequence(2, 0xfffffffeUL) == 4);
 
+using Clock = std::chrono::steady_clock;
+
+static DWORD PollInterval(Clock::time_point deadline, DWORD maximum) {
+    auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    return static_cast<DWORD>(std::clamp<decltype(remaining)>(remaining, 0, maximum));
+}
+
+struct FrameReceipt {
+    const char* failure{};
+    DWORD error{};
+};
+
 class XiaojiDevice {
 public:
     explicit XiaojiDevice(int index, const std::wstring& prefix = L"Global\\Xiaoji")
@@ -536,12 +553,17 @@ public:
           ackView_(static_cast<InputAck*>(ack_.Data())) {}
 
     bool WaitForDriver(int timeoutMs, const std::function<bool(DWORD)>& stop = {}) const {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
-        while (std::chrono::steady_clock::now() < deadline) {
+        return WaitForDriver(Clock::now() + std::chrono::milliseconds(timeoutMs), stop);
+    }
+
+    bool WaitForDriver(Clock::time_point deadline, const std::function<bool(DWORD)>& stop = {}) const {
+        for (;;) {
             if ((ackView_->capabilities & kAckDelivered) != 0)
                 return true;
-            if (stop) { if (stop(25)) return false; }
-            else std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            auto wait = PollInterval(deadline, 25);
+            if (!wait) break;
+            if (stop) { if (stop(wait)) return false; }
+            else std::this_thread::sleep_for(std::chrono::milliseconds(wait));
         }
         throw std::runtime_error(
             "xiaoji driver did not open the input acknowledgement section; "
@@ -592,8 +614,7 @@ public:
         }
     }
 
-private:
-    void WriteFrame(const BYTE* data, ULONG size) {
+    ULONG PublishFrame(const BYTE* data, ULONG size) {
         if (size > sizeof(SharedInput::data))
             throw std::runtime_error("report exceeds xiaoji shared input capacity");
 
@@ -605,14 +626,26 @@ private:
         inputView_->extendedReportSize = 0;
         MemoryBarrier();
         inputView_->seqNo = sequence;
-        if (!SetEvent(inputEvent_.Get()))
-            Fail("SetEvent");
+        return sequence;
+    }
 
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    FrameReceipt SignalAndWait(ULONG sequence, DWORD ackMs) const noexcept {
+        if (!SetEvent(inputEvent_.Get())) return {"SetEvent", GetLastError()};
+
+        const auto deadline = Clock::now() + std::chrono::milliseconds(ackMs);
         while (static_cast<ULONG>(ackView_->deliveredSeqNo) != sequence) {
-            if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("HID report acknowledgement timed out; delivery is uncertain.");
-            if (WaitForSingleObject(ackEvent_.Get(), 10) == WAIT_FAILED) Fail("Wait for HID acknowledgement");
+            auto wait = PollInterval(deadline, 10);
+            if (!wait) return {"HID report acknowledgement timed out; delivery is uncertain."};
+            if (WaitForSingleObject(ackEvent_.Get(), wait) == WAIT_FAILED) return {"Wait for HID acknowledgement", GetLastError()};
         }
+        return {};
+    }
+
+private:
+    void WriteFrame(const BYTE* data, ULONG size) {
+        auto receipt = SignalAndWait(PublishFrame(data, size), 2000);
+        if (receipt.error) throw std::runtime_error(std::string(receipt.failure) + ": " + Win32Message(receipt.error));
+        if (receipt.failure) throw std::runtime_error(receipt.failure);
     }
 
     Section input_;
@@ -1165,12 +1198,146 @@ std::uint32_t StartedDevices() {
     return mask;
 }
 
+struct InputEnvironment {
+    const wchar_t* prefix;
+    std::function<bool()> admin;
+    std::function<bool(int)> bound;
+    std::function<RunningLayout(int)> layout;
+
+    std::wstring LockName() const { return std::wstring(prefix) + L"HostOperation"; }
+};
+
+static const InputEnvironment installedEnvironment{L"Global\\Xiaoji", [] { return IsUserAnAdmin() != FALSE; },
+    [](int index) { return !BoundOem(index, true, {}).empty(); }, QueryRunningLayout};
+#ifdef XIAOJI_SESSION_TEST
+static thread_local const InputEnvironment* inputEnvironment = &installedEnvironment;
+#else
+static constexpr const InputEnvironment* inputEnvironment = &installedEnvironment;
+#endif
+static std::atomic<bool> sessionOpen{false};
+static thread_local InputSession* ownedSession{};
+
+void RequireNoSession() {
+    if (sessionOpen.load()) throw std::runtime_error("An input session is already open in this process.");
+}
+
+struct KeyboardState {
+    BYTE modifiers{};
+    std::array<BYTE, kBitmapUsages / 8> bitmap{};
+};
+
+static std::array<BYTE, kKeyboardBytes> KeyboardReport(const KeyboardState& state) {
+    std::array<BYTE, kKeyboardBytes> report{};
+    report[0] = state.modifiers;
+    std::copy(state.bitmap.begin(), state.bitmap.end(), report.begin() + kLegacyKeyboardBytes);
+    return report;
+}
+
+static std::array<BYTE, kMouseBytes> MouseReport(BYTE buttons, int detents) {
+    return {buttons, 0, 0, static_cast<BYTE>(detents)};
+}
+
+static BYTE SetBit(BYTE value, unsigned bit, bool down) {
+    unsigned mask = 1u << bit;
+    return static_cast<BYTE>(down ? value | mask : value & ~mask);
+}
+
+class InputSession {
+public:
+    InputSession(const InputEnvironment& env, uint32_t devices, uint32_t readyMs, uint32_t ackMs)
+        : lock_(env.LockName().c_str()), ackMs_(ackMs) {
+        for (int index : {0, 1}) {
+            if (!(devices & (1u << index))) continue;
+            if (!env.bound(index)) throw std::runtime_error("Requested xiaoji device is not installed.");
+            auto layout = env.layout(index);
+            if (layout.version == LayoutVersion::legacy)
+                throw std::runtime_error("Legacy HID layout; run install with the new xiaoji.exe first.");
+            if (layout.version != LayoutVersion::current)
+                throw std::runtime_error("Cannot determine running HID layout: " + layout.detail);
+            devices_[index] = std::make_unique<XiaojiDevice>(index, env.prefix);
+        }
+        const auto deadline = Clock::now() + std::chrono::milliseconds(readyMs);
+        for (const auto& device : devices_) if (device) device->WaitForDriver(deadline);
+    }
+
+    void Key(BYTE usage, bool down) {
+        auto& device = Device(0);
+        auto next = keyboard_;
+        if (usage >= 0xe0 && usage <= 0xe7) next.modifiers = SetBit(next.modifiers, usage - 0xe0, down);
+        else if (usage >= 4 && usage < kBitmapUsages) next.bitmap[usage / 8] = SetBit(next.bitmap[usage / 8], usage % 8, down);
+        else throw std::invalid_argument("Expected keyboard usage 0x04..0x9F or 0xE0..0xE7.");
+        Publish(device, KeyboardReport(next), keyboard_, next);
+    }
+
+    void Button(uint32_t button, bool down) {
+        auto& device = Device(1);
+        if (!button || button > kMouseButtons) throw std::invalid_argument("Expected mouse button 1..5.");
+        auto next = SetBit(buttons_, button - 1, down);
+        Publish(device, MouseReport(next, 0), buttons_, next);
+    }
+
+    void Wheel(int detents) {
+        auto& device = Device(1);
+        if (!detents || detents < -127 || detents > 127) throw std::invalid_argument("Expected nonzero wheel detents in -127..127.");
+        Publish(device, MouseReport(buttons_, detents), buttons_, buttons_);
+    }
+
+private:
+    XiaojiDevice& Device(int index) {
+        if (!devices_[index]) throw std::invalid_argument("Requested device is not open in this session.");
+        return *devices_[index];
+    }
+
+    template<size_t Size, typename State>
+    void Publish(XiaojiDevice& device, const std::array<BYTE, Size>& report, State& published, const State& next) {
+        auto sequence = device.PublishFrame(report.data(), static_cast<ULONG>(Size));
+        published = next;
+        auto receipt = device.SignalAndWait(sequence, ackMs_);
+        if (receipt.error) throw Unconfirmed(std::string(receipt.failure) + ": " + Win32Message(receipt.error));
+        if (receipt.failure) throw Unconfirmed(receipt.failure);
+    }
+
+    OperationLock lock_;
+    DWORD ackMs_;
+    std::unique_ptr<XiaojiDevice> devices_[2];
+    KeyboardState keyboard_{};
+    BYTE buttons_{};
+};
+
+InputSession* OpenSession(uint32_t devices, uint32_t readyMs, uint32_t ackMs) {
+    const auto& env = *inputEnvironment;
+    if (!env.admin()) throw std::runtime_error("Input requires an elevated process.");
+    RequireNoSession();
+    ownedSession = new InputSession(env, devices, readyMs, ackMs);
+    sessionOpen.store(true);
+    return ownedSession;
+}
+
+static InputSession& OwnedSession(InputSession* session) {
+    if (!session) throw std::invalid_argument("Missing input session.");
+    if (session != ownedSession) throw std::invalid_argument("Use the open session on its opening thread.");
+    return *session;
+}
+
+void SessionKey(InputSession* session, uint8_t usage, bool down) { OwnedSession(session).Key(usage, down); }
+void SessionButton(InputSession* session, uint32_t button, bool down) { OwnedSession(session).Button(button, down); }
+void SessionWheel(InputSession* session, int32_t detents) { OwnedSession(session).Wheel(detents); }
+
+void CloseSession(InputSession* session) {
+    OwnedSession(session);
+    ownedSession = nullptr;
+    // Clear under the operation lock, never after another opener can acquire it.
+    sessionOpen.store(false);
+    delete session;
+}
+
 template <typename Operation>
 static void WithInstalledDevice(int index, Operation operation) {
-    if (!IsUserAnAdmin()) throw std::runtime_error("Input requires an elevated process.");
-    OperationLock lock;
-    if (BoundOem(index, true, {}).empty()) throw std::runtime_error("Requested xiaoji device is not installed.");
-    XiaojiDevice device(index);
+    const auto& env = *inputEnvironment;
+    if (!env.admin()) throw std::runtime_error("Input requires an elevated process.");
+    OperationLock lock(env.LockName().c_str());
+    if (!env.bound(index)) throw std::runtime_error("Requested xiaoji device is not installed.");
+    XiaojiDevice device(index, env.prefix);
     device.WaitForDriver(10000);
     operation(device);
 }
@@ -1194,6 +1361,151 @@ void TypeInstalled(const std::string& text) {
 void MoveInstalled(int dx, int dy, int wheel) {
     WithInstalledDevice(1, [&](XiaojiDevice& device) { device.MoveMouse(dx, dy, wheel); });
 }
+
+#ifdef XIAOJI_SESSION_TEST
+static void ExpectResult(int actual, int expected, const char* detail = "") {
+    const std::string message = XiaojiLastError();
+    if (actual != expected || (expected == 0 ? !message.empty() : message.empty()) || message.find(detail) == std::string::npos)
+        throw std::runtime_error("Expected " + std::to_string(expected) + " (" + detail + "), got " + std::to_string(actual) + ": " + message);
+}
+
+class SessionPeer {
+public:
+    SessionPeer(const std::wstring& prefix, int index)
+        : input_(prefix + L"Input" + std::to_wstring(index), sizeof(SharedInput)),
+          ack_(prefix + L"InputAck" + std::to_wstring(index), sizeof(InputAck)),
+          inputEvent_(prefix + L"InputEvent" + std::to_wstring(index)),
+          ackEvent_(prefix + L"InputAckEvent" + std::to_wstring(index)) { Ready(true); }
+
+    void Ready(bool ready) { Receipt()->capabilities = ready ? kAckDelivered : 0; }
+    ULONG Sequence() const { return Frame()->seqNo; }
+
+    template<size_t Size, typename Send>
+    void Expect(const std::array<BYTE, Size>& report, Send send, bool acknowledge = true) {
+        const ULONG sequence = Sequence() + 2;
+        auto reader = std::async(std::launch::async, [&] {
+            if (WaitForSingleObject(inputEvent_.Get(), 3000) != WAIT_OBJECT_0 || Sequence() != sequence ||
+                Frame()->dataSize != Size || Frame()->extendedReportSize != 0 || std::memcmp(Frame()->data, report.data(), Size) != 0)
+                throw std::runtime_error("Incorrect private report or sequence: " + std::to_string(sequence));
+            if (acknowledge) {
+                InterlockedExchange(&Receipt()->deliveredSeqNo, sequence);
+                if (!SetEvent(ackEvent_.Get())) Fail("Acknowledge private session report");
+            }
+        });
+        int result = send();
+        reader.get();
+        ExpectResult(result, acknowledge ? XIAOJI_OK : XIAOJI_UNCONFIRMED);
+    }
+
+private:
+    SharedInput* Frame() const { return static_cast<SharedInput*>(input_.Data()); }
+    InputAck* Receipt() const { return static_cast<InputAck*>(ack_.Data()); }
+    Section input_, ack_;
+    Event inputEvent_, ackEvent_;
+};
+
+static void SessionTest() {
+    const std::wstring prefix = L"Local\\XiaojiSessionTest-" + std::to_wstring(GetCurrentProcessId()) + L"-";
+    SessionPeer keyboard(prefix, 0), mouse(prefix, 1);
+    bool admin = true, bound = true;
+    auto layout = LayoutVersion::current;
+    InputEnvironment env{prefix.c_str(), [&] { return admin; }, [&](int index) { return index == 0 || bound; },
+        [&](int index) { return RunningLayout{index == 0 ? LayoutVersion::current : layout, "test layout"}; }};
+    struct RestoreEnvironment {
+        const InputEnvironment* previous = inputEnvironment;
+        ~RestoreEnvironment() { inputEnvironment = previous; }
+    } restore;
+    inputEnvironment = &env;
+
+    XiaojiSession* session{};
+    auto open = [&](uint32_t devices, int expected, const char* detail = "") {
+        ExpectResult(XiaojiSessionOpen(devices, 100, 400, &session), expected, detail);
+        if ((session != nullptr) != (expected == 0)) throw std::runtime_error("Incorrect session output.");
+    };
+    auto unchanged = [&](ULONG keys, ULONG buttons) {
+        if (keyboard.Sequence() != keys || mouse.Sequence() != buttons) throw std::runtime_error("Unexpected session publication.");
+    };
+    admin = false; open(3, 2, "elevated"); admin = true;
+    bound = false; open(3, 2, "not installed"); bound = true;
+    layout = LayoutVersion::legacy; open(3, 2, "install");
+    layout = LayoutVersion::unknown; open(3, 2, "test layout"); layout = LayoutVersion::current;
+    mouse.Ready(false); open(3, 2, "acknowledgement"); mouse.Ready(true);
+    std::async(std::launch::async, [&] { OperationLock recovered(env.LockName().c_str()); }).get();
+    open(3, 0);
+    XiaojiSession* second = session;
+    ExpectResult(XiaojiSessionOpen(1, 100, 400, &second), 2, "already open");
+    if (second) throw std::runtime_error("Duplicate open returned a handle.");
+    ExpectResult(XiaojiTapKey(0, 4), 2, "session");
+    ExpectResult(XiaojiTypeAscii("x", 1), 2, "session");
+    ExpectResult(XiaojiMoveMouse(0, 0, 1), 2, "session");
+    ExpectResult(XiaojiCheckConnection(1), 2, "session");
+    for (BYTE usage : std::array<BYTE, 5>{0, 3, 0xa0, 0xdf, 0xe8}) ExpectResult(XiaojiSessionKey(session, usage, 1), 1);
+    for (auto button : {0u, 6u}) ExpectResult(XiaojiSessionButton(session, button, 1), 1);
+    for (auto detents : {0, -128, 128}) ExpectResult(XiaojiSessionWheel(session, detents), 1);
+    unchanged(0, 0);
+
+    auto key = [&](BYTE usage, int down, BYTE mods, BYTE first, BYTE last, bool ack = true) {
+        std::array<BYTE, 28> report{};
+        report[0] = mods; report[8] = first; report[27] = last;
+        keyboard.Expect(report, [&] { return XiaojiSessionKey(session, usage, down); }, ack);
+    };
+    key(0xe0, 1, 1, 0, 0);
+    key(4, -1, 1, 0x10, 0);
+    std::async(std::launch::async, [&] {
+        ExpectResult(XiaojiSessionKey(session, 4, 0), 1, "thread");
+        ExpectResult(XiaojiSessionButton(session, 3, 1), 1, "thread");
+        ExpectResult(XiaojiSessionWheel(session, 1), 1, "thread");
+        ExpectResult(XiaojiSessionClose(session), 1, "thread");
+        ExpectResult(XiaojiCheckConnection(0), 2, "session");
+        try { OperationLock contender(env.LockName().c_str()); }
+        catch (const std::runtime_error& error) {
+            if (std::string(error.what()).find("Another host operation") != std::string::npos) return;
+            throw;
+        }
+        throw std::runtime_error("Session did not retain its operation lock.");
+    }).get();
+    unchanged(4, 0);
+    key(0x9f, 1, 1, 0x10, 0x80, false);
+    key(5, 1, 1, 0x30, 0x80);
+    key(0xe7, 1, 0x81, 0x30, 0x80);
+    key(4, 1, 0x81, 0x30, 0x80);
+    key(4, 0, 0x81, 0x20, 0x80);
+    key(4, 0, 0x81, 0x20, 0x80);
+    key(0xe0, 0, 0x80, 0x20, 0x80);
+    key(0xe7, 0, 0, 0x20, 0x80);
+    key(5, 0, 0, 0, 0x80);
+    key(0x9f, 0, 0, 0, 0);
+
+    for (unsigned button = 1; button <= 5; ++button) {
+        std::array<BYTE, 4> report{static_cast<BYTE>((1u << button) - 1), 0, 0, 0};
+        mouse.Expect(report, [&] { return XiaojiSessionButton(session, button, 1); }, button != 5);
+    }
+    for (int detents : {-127, 127}) {
+        std::array<BYTE, 4> report{31, 0, 0, static_cast<BYTE>(detents)};
+        mouse.Expect(report, [&] { return XiaojiSessionWheel(session, detents); });
+    }
+    mouse.Expect(std::array<BYTE, 4>{29, 0, 0, 0}, [&] { return XiaojiSessionButton(session, 2, 0); });
+    auto keys = keyboard.Sequence(), buttons = mouse.Sequence();
+    ExpectResult(XiaojiSessionClose(session), 0);
+    open(1, 0);
+    ExpectResult(XiaojiSessionButton(session, 1, 1), 1);
+    ExpectResult(XiaojiSessionWheel(session, 1), 1);
+    ExpectResult(XiaojiSessionClose(session), 0);
+    open(2, 0);
+    ExpectResult(XiaojiSessionKey(session, 4, 1), 1);
+    unchanged(keys, buttons);
+    mouse.Expect(std::array<BYTE, 4>{0, 0, 0, 1}, [&] { return XiaojiSessionWheel(session, 1); });
+    ExpectResult(XiaojiSessionClose(session), 0);
+    unchanged(keys, buttons + 2);
+    std::async(std::launch::async, [&] {
+        inputEnvironment = &env;
+        open(3, 0);
+        ExpectResult(XiaojiSessionClose(session), 0);
+    }).get();
+    unchanged(keys, buttons + 2);
+    std::cout << "Private IPC session: full reports, publication, timeout, ownership and reopen OK; no desktop input.\n";
+}
+#endif
 }
 
 int RunXiaojiHost(int argc, char** argv, int (*installEmbeddedPackage)(bool)) {
@@ -1210,6 +1522,9 @@ int RunXiaojiHost(int argc, char** argv, int (*installEmbeddedPackage)(bool)) {
         }
         if (command == "reconnect-test" && argc == 2) { ReconnectTest(); return 0; }
         if (command == "repeat-test" && argc == 2) { RepeatTest(); return 0; }
+#ifdef XIAOJI_SESSION_TEST
+        if (command == "session-test" && argc == 2) { SessionTest(); return 0; }
+#endif
         if (command == "install" && (argc == 2 || (argc == 3 && std::string(argv[2]) == "--check")))
             return installEmbeddedPackage(argc == 3);
         OperationLock operation;

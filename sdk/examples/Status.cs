@@ -29,7 +29,7 @@ class Status
 
     static void Main()
     {
-        if (XiaojiGetAbiVersion() != 1) throw new NotSupportedException("Expected xiaoji client ABI 1");
+        if (XiaojiGetAbiVersion() != 2) throw new NotSupportedException("Expected xiaoji client ABI 2");
         uint devices;
         Check(XiaojiGetDevices(out devices));
         Console.WriteLine("keyboard={0} mouse={1}", (devices & 1) != 0, (devices & 2) != 0);

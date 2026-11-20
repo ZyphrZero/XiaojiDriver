@@ -24,6 +24,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "host self-test exit=$LASTEXITCODE" }
         & $exe repeat-test
         if ($LASTEXITCODE -ne 0) { throw "private IPC repeat-test exit=$LASTEXITCODE" }
+        & $exe session-test
+        if ($LASTEXITCODE -ne 0) { throw "private IPC session-test exit=$LASTEXITCODE" }
         $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
         if ($principal.IsInRole([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))) {
             $token = [guid]::NewGuid().ToString('N')

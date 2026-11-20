@@ -10,8 +10,8 @@ class Xiaoji:
         path = Path(library) if library is not None else Path(__file__).with_name("xiaoji_client.dll")
         self._dll = ctypes.CDLL(str(path.resolve(strict=True)))
         self._bind("XiaojiGetAbiVersion", ctypes.c_uint32)
-        if self._dll.XiaojiGetAbiVersion() != 1:
-            raise RuntimeError("Unsupported xiaoji client ABI (expected 1)")
+        if self._dll.XiaojiGetAbiVersion() != 2:
+            raise RuntimeError("Unsupported xiaoji client ABI (expected 2)")
         self._bind("XiaojiLastError", ctypes.c_char_p)
         self._bind("XiaojiGetDevices", ctypes.c_int, ctypes.POINTER(ctypes.c_uint32))
         self._bind("XiaojiCheckConnection", ctypes.c_int, ctypes.c_uint32)

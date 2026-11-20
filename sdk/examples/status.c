@@ -4,7 +4,7 @@
 int main(void) {
     uint32_t devices = 0;
     if (XiaojiGetAbiVersion() != XIAOJI_CLIENT_ABI) {
-        fputs("Unsupported xiaoji client ABI\n", stderr);
+        fprintf(stderr, "Expected xiaoji client ABI %d\n", XIAOJI_CLIENT_ABI);
         return 1;
     }
     if (XiaojiGetDevices(&devices) != XIAOJI_OK) {
