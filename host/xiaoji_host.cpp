@@ -909,8 +909,9 @@ void EnsureDevices(const std::wstring& allowedInfs, const std::wstring& priorInf
             if (!restart) {
                 auto active = QueryRunningLayout(index).version;
                 if (active == LayoutVersion::current) continue;
-                // A prior install can have written the new config but failed to restart.
-                restart = active == LayoutVersion::legacy;
+                // A prior install can have written the new config but failed to restart,
+                // or the running device may be on an unknown layout.
+                restart = active != LayoutVersion::current;
             }
             if (restart) RestartDevice(instance);
         }

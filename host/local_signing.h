@@ -10,6 +10,7 @@ std::filesystem::path PrepareLocalPackage(const std::filesystem::path& source, P
                                           PackageCheck verify, const Progress& progress);
 void RemoveLocalTrust();
 bool IsMissingPublishedInf(unsigned long error);
+bool SameSignedBuild(const std::filesystem::path& sourceDir, const std::filesystem::path& stagedDir);
 #ifdef XIAOJI_SESSION_TEST
 void SigningTest(const std::filesystem::path& source);
 #endif

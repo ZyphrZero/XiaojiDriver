@@ -148,11 +148,16 @@ void Install(const fs::path& inf, const xiaoji::Progress& progress = {}) {
     auto name = xiaoji::StageDriverPackage(inf.wstring());
     auto staged = StoreInf(name);
     VerifyPackage(staged, static_cast<bool>(progress));
+    bool exact = true;
     for (auto file : {L"xiaoji.inf", L"xiaoji.dll", L"xiaoji.cat"}) {
         std::ifstream source(inf.parent_path()/file, std::ios::binary), actual(staged.parent_path()/file, std::ios::binary);
-        if (!source || !actual || !std::equal(std::istreambuf_iterator<char>(source), {}, std::istreambuf_iterator<char>(actual), std::istreambuf_iterator<char>()))
-            throw std::runtime_error("Windows staged a different build; devices were not rebound. Check DriverVer.");
+        if (!source || !actual || !std::equal(std::istreambuf_iterator<char>(source), {}, std::istreambuf_iterator<char>(actual), std::istreambuf_iterator<char>())) {
+            exact = false;
+            break;
+        }
     }
+    if (!exact && !(progress && xiaoji::SameSignedBuild(inf.parent_path(), staged.parent_path())))
+        throw std::runtime_error("Windows staged a different build; devices were not rebound. Check DriverVer.");
     if (progress) progress("devices", "Configure the fixed keyboard and mouse");
     xiaoji::EnsureDevices(L"," + name + L",", Allowed(prior));
     if (!progress) std::wcout << L"Installed: " << name << L"; keyboard and mouse started.\n";

@@ -556,6 +556,13 @@ fs::path PrepareLocalPackage(const fs::path& source, PackageCheck identity, Pack
 bool IsMissingPublishedInf(unsigned long error) {
     return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND || error == ERROR_NOT_FOUND;
 }
+bool SameSignedBuild(const fs::path& sourceDir, const fs::path& stagedDir) {
+    std::ifstream leftInf(sourceDir/files[0], std::ios::binary), rightInf(stagedDir/files[0], std::ios::binary);
+    if (!leftInf || !rightInf ||
+        !std::equal(std::istreambuf_iterator<char>(leftInf), {}, std::istreambuf_iterator<char>(rightInf), std::istreambuf_iterator<char>()))
+        return false;
+    return ArtifactHash(sourceDir/files[1]) == ArtifactHash(stagedDir/files[1]);
+}
 void RemoveLocalTrust() {
     auto thumb = RecordedThumb();
     if (thumb.empty()) return;
@@ -636,6 +643,7 @@ static void TestPackageSignature(const fs::path& source, WorkDirectory& work) {
         if (status != CERT_E_UNTRUSTEDROOT) Error("Expected WinVerifyTrust to reject only the untrusted test root", status);
     }
     Require(hash == ArtifactHash(dll), "Signing changed PE catalog hash");
+    Require(SameSignedBuild(source, work.path), "SameSignedBuild rejected an identically built signed DLL");
     auto signedReceipt = SignedReceipt(work.path);
     Require(signedReceipt == CacheReceipt(FileHash(dll), FileHash(cat)) &&
         !std::equal(signedReceipt.begin(), signedReceipt.begin()+32, unsignedReceipt.begin()) &&
@@ -645,6 +653,7 @@ static void TestPackageSignature(const fs::path& source, WorkDirectory& work) {
     edit.seekg(0x40); int previous = edit.get();
     edit.seekp(0x40); edit.put(static_cast<char>(previous ^ 1)); edit.close();
     Require(previous != EOF && edit && ArtifactHash(dll) != hash, "DLL mutation did not change member hash");
+    Require(!SameSignedBuild(source, work.path), "SameSignedBuild accepted a mutated DLL");
     try { CheckMembers(work.path); }
     catch (const std::runtime_error& err) {
         if (std::string_view(err.what()) != "Catalog does not contain the supplied INF/DLL hash") throw;
